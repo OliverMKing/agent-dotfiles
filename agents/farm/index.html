@@ -329,7 +329,15 @@ async function refresh() {
     render();
   } catch (e) { document.getElementById("updated").textContent = "Lost contact with the farm. Retrying…"; }
 }
+const drafts = {};  // unsent message per agent: switching agents never carries text over
+function stashDraft() {
+  const box = document.getElementById("say");
+  if (openName) { if (box.value.trim()) drafts[openName] = box.value; else delete drafts[openName]; }
+}
 async function openDetail(name) {
+  stashDraft();
+  const box = document.getElementById("say");
+  if (name !== openName) { box.value = drafts[name] || ""; document.getElementById("say-err").hidden = true; }
   openName = name;
   const d = document.getElementById("drawer"); d.classList.add("open");
   clearInterval(detailTimer); await loadDetail(); detailTimer = setInterval(loadDetail, 3000);
@@ -400,7 +408,7 @@ document.getElementById("composer").addEventListener("submit", async e => {
   err.hidden = true; box.disabled = true;
   const res = await say(openName, text);
   box.disabled = false;
-  if (res.ok) { box.value = ""; document.getElementById("d-content").dataset.sig = ""; setTimeout(loadDetail, 1500); }
+  if (res.ok) { box.value = ""; delete drafts[openName]; document.getElementById("d-content").dataset.sig = ""; setTimeout(loadDetail, 1500); }
   else { err.textContent = `Not sent: ${res.reason}`; err.hidden = false; }
   box.focus();
 });
@@ -415,6 +423,7 @@ function goTo(target) {
   el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
 }
 function closeDetail() {
+  stashDraft();
   openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
   const c = document.getElementById("d-content"); c.dataset.name = ""; c.dataset.sig = "";
 }
