@@ -178,7 +178,7 @@ without reporting, or stops running. Act on each note:
 ## Waiting
 
 Between turns, just end your turn. Lead reports and the user's input arrive as new messages.
-Do not sleep or poll in a shell loop. If a lead seems stuck, check it with
+Do not sleep, poll in a shell loop, or use a built-in "wait for agents" tool. If a lead seems stuck, check it with
 `herdr agent get <name>` and `herdr agent read <name> --source recent-unwrapped --lines 80`.
 If a lead is blocked on a permission prompt, tell the user in a "Needs you" item. Do not
 bypass it.

@@ -30,6 +30,8 @@ because you may run for days.
 - Children are single-use. A child sends one final report and its pane closes. Never send a
   second task to a finished child: start a new one, and pass it the earlier output as input.
   Use a new reviewer for every review round, including a re-review of a fix.
+- To wait for children, end your turn. Their reports arrive as new messages. Do not wait with
+  sleep loops, polling, or a built-in "wait for agents" tool: those keep you busy and add delay.
 - Keep at most 3 live children at a time. Start independent children at the same time.
 - Only one agent edits your worktree at a time: you or one worker. Children that run in parallel
   must be read-only (researchers and reviewers) or work in separate worktrees.
