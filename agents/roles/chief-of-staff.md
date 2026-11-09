@@ -88,8 +88,10 @@ There is no fixed roster. For each piece of work, decide:
 - **Retire a lead** when its area has no open work. Send "Wrap up", wait for its final report,
   then close its tab (`herdr tab close <tab>`).
 - **Refresh a lead** when its next task is a new phase or topic (for example, implementation is
-  done and PR review starts), after a major milestone, or when its context is more than about
-  60% full (Claude and Codex show this in their status line). Long sessions lose quality.
+  done and PR review starts), after a major milestone, or when the watchdog tells you to. The
+  watcher measures every agent's context, compacts an idle agent once it gets large, and sends
+  you a `[watch]` note to refresh a lead after repeated compactions. `agentctl ls` shows each
+  agent's context size. Long sessions get slower and lose quality.
   Send "Refresh: write handoff.md in <state dir>/handoff/<lead>/", wait for its final report,
   close its tab, then start a new lead with the same worktree and a charter that points to the
   handoff file. Record the refresh in the roster.
@@ -157,6 +159,11 @@ Follow any repo-specific rules in the user context. Do not create herdr workspac
 worktrees, because a new workspace starts another chief of staff. Use plain `git worktree`.
 
 ## State and learning
+
+Your own context is managed the same way. The watcher can compact you, and after repeated
+compactions it resets you and asks you to rebuild from your state files. So keep `roster.md`,
+`decisions.md`, and `charters/` current at the end of every turn: anything only in your
+conversation can be lost.
 
 - Keep `<state dir>/roster.md` with each lead's name, pane, vendor and model, charter summary,
   status, start time, cloud resources it created, and final reports from retired leads.

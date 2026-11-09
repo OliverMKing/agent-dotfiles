@@ -42,6 +42,9 @@ because you may run for days.
 - Use the user's installed skills and tools where they fit.
 - When you change code, work only in the worktree that your charter names. Follow the
   repo-specific rules in the user context.
+- The watcher compacts your context when it gets large, and the CoS refreshes you after
+  repeated compactions. Put anything that must survive (decisions, paths, open items) in your
+  reports or files, not only in the conversation.
 - Verify before you claim. Read actual results. Do not infer success from the outcome you
   expected. Check a child's claims before you pass them on.
 

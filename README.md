@@ -66,6 +66,16 @@ The watcher also follows every agent that `spawn` starts. `spawn` records each c
 
 If a chief of staff exits, or a parent cannot get the note, the watchdog shows a herdr notification to you.
 
+### Context size
+
+Large contexts make every turn slower and more expensive, and they lower quality. The watcher reads the token use of each agent from its own transcript. For Claude, it reads `~/.claude/projects/*/<session>.jsonl`. For Codex, it reads `~/.codex/sessions/**/<session>.jsonl`. It then acts in this order:
+
+1. When an agent is idle and its context is more than `compact_at_tokens` (100k) or `compact_at_fraction` (40%) of its window, the watcher sends `/compact`. For Claude, the command says what to keep. The watcher never types over a draft.
+2. After `max_compactions` (2), the watcher tells the CoS to refresh the lead. The lead writes `handoff.md`, and a new lead starts from it.
+3. For a CoS, the watcher clears its context (`/clear` or `/new`). Then it tells the CoS to rebuild from `roster.md`, `decisions.md`, `charters/` and the registry. For this reason, the CoS keeps these files current at the end of every turn.
+
+Workers, reviewers and researchers are single-use, so their contexts stay small. `agentctl ls` shows the context size and compaction count of each agent. The limits are in the `context` section of `agents/models.json`.
+
 ### Restart and resume
 
 herdr resumes agent panes after a server restart. herdr's own Claude and Codex integrations resume with only `claude --resume <id>` or `codex resume <id>`. That command loses the model, the permission mode, the settings, the role prompt and the agent environment. To prevent this, the watchdog reports a resume command for every agent that `agentctl` starts:

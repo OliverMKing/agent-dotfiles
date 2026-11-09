@@ -52,5 +52,12 @@
     "worker": "standard",
     "reviewer": "standard",
     "researcher": "standard"
+  },
+  "context": {
+    "_comment": "The watcher compacts an idle agent once its context passes compact_at_tokens or compact_at_fraction of its window (whichever is lower). After max_compactions, a lead is flagged for a handoff refresh and a chief of staff is reset and re-briefed from its state files.",
+    "compact_at_tokens": 100000,
+    "compact_at_fraction": 0.4,
+    "max_compactions": 2,
+    "claude_window": 200000
   }
 }

@@ -558,8 +558,14 @@ def cmd_resume(a):
 def cmd_ls(a):
     wid = a.workspace or os.environ.get("HERDR_WORKSPACE_ID")
     rows = [x for x in herdr("agent", "list")["agents"] if not wid or x["workspace_id"] == wid]
+    reg = {e["name"]: e for e in reg_all() if e.get("name")}
+    print(f"{'NAME':<32} {'STATUS':<8} {'PANE':<8} {'CONTEXT':<16} {'COMPACTED':<9} CWD")
     for x in rows:
-        print(f"{x.get('name') or '-':<32} {x['agent_status']:<8} {x['pane_id']:<8} {x.get('cwd', '')}")
+        e = reg.get(x.get("name") or "", {})
+        tok, win = e.get("context_tokens"), e.get("context_window")
+        ctx = f"{tok // 1000}k/{win // 1000}k" if tok and win else "-"
+        print(f"{x.get('name') or '-':<32} {x['agent_status']:<8} {x['pane_id']:<8} {ctx:<16} "
+              f"{e.get('compactions', 0):<9} {x.get('cwd', '')}")
 
 
 def cmd_start_cos(a):
@@ -838,6 +844,62 @@ def screen_tail(name, n=4):
     return " | ".join(lines[-n:])[:300]
 
 
+# ------------------------------------------------------------------ context size management
+
+COMPACT_KEEP = ("Keep: your role and charter, the current state, open items, pending decisions and their "
+                "IDs, file paths, branches and worktrees, cloud resources, and who your parent and children "
+                "are. Drop: raw tool output, logs, and superseded plans.")
+
+
+def context_cfg():
+    c = dict(json.load(open(MODELS)).get("context", {}))
+    if os.environ.get("AGENTCTL_COMPACT_AT_TOKENS"):  # tests
+        c["compact_at_tokens"] = int(os.environ["AGENTCTL_COMPACT_AT_TOKENS"])
+    return c
+
+
+def _tail_lines(path, nbytes=4_000_000):
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - nbytes))
+        return f.read().decode("utf-8", "replace").splitlines()
+
+
+def context_usage(vendor, session_id):
+    """(tokens in context now, window) from the agent's own transcript, or (None, None)."""
+    import glob
+    if not session_id:
+        return None, None
+    try:
+        if vendor == "claude":
+            files = glob.glob(os.path.join(HOME, ".claude", "projects", "*", f"{session_id}.jsonl"))
+            if not files:
+                return None, None
+            for line in reversed(_tail_lines(files[0])):
+                if '"usage"' not in line:
+                    continue
+                u = (json.loads(line).get("message") or {}).get("usage") or {}
+                if "input_tokens" in u:
+                    tokens = u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0) + \
+                        u.get("cache_creation_input_tokens", 0)
+                    return tokens, context_cfg().get("claude_window", 200000)
+        else:
+            files = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"*{session_id}*.jsonl"))
+            if not files:
+                return None, None
+            for line in reversed(_tail_lines(files[0])):
+                if '"token_count"' not in line:
+                    continue
+                info = (json.loads(line).get("payload") or {}).get("info") or {}
+                last = info.get("last_token_usage") or {}
+                if last:
+                    return last.get("input_tokens", 0), info.get("model_context_window") or 258400
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
 BLOCKED_GRACE = 30   # s a child may sit at a dialog before the parent is told
 SILENT_GRACE = 20    # s after a turn ends before "ended a turn without reporting"
 
@@ -854,6 +916,7 @@ class ChildWatch(threading.Thread):
         self.last_alive_check = time.time()
         self.reported_sid = None
         self.unstick_tries = 0
+        self.last_ctx_check = 0
         self.stop = False
 
     def run(self):
@@ -936,8 +999,59 @@ class ChildWatch(threading.Thread):
             self.blocked_since = None
         self.e["_last_status"], self.e["_status_at"] = status, now
 
+    def check_context(self, status, at):
+        """Compact an idle agent whose context got large; after repeated compactions, refresh it."""
+        e, now = self.e, time.time()
+        if status not in ("idle", "done") or now - at < 15 or now - self.last_ctx_check < 60:
+            return
+        self.last_ctx_check = now
+        reg = json.load(open(reg_path(e["workspace_id"], e["name"])))
+        if now - (reg.get("last_compact") or 0) < 600:  # usage on disk lags until the next turn
+            return
+        tokens, window = context_usage(e["model"]["vendor"], reg.get("session_id"))
+        if not tokens:
+            return
+        cfg = context_cfg()
+        limit = min(cfg.get("compact_at_tokens", 100000), int(cfg.get("compact_at_fraction", 0.4) * window))
+        reg_update(e["workspace_id"], e["name"], context_tokens=tokens, context_window=window)
+        if tokens < limit or has_draft(e["name"]):
+            return
+        done = reg.get("compactions", 0)
+        if done < cfg.get("max_compactions", 2):
+            cmd = f"/compact {COMPACT_KEEP}" if e["model"]["vendor"] == "claude" else "/compact"
+            herdr("agent", "prompt", e["name"], cmd, check=False)
+            reg_update(e["workspace_id"], e["name"], compactions=done + 1, last_compact=now)
+            log(f"context {e['name']}: {tokens} tokens of {window}; compacting ({done + 1})")
+        elif reg.get("refresh_flagged") != done:
+            reg_update(e["workspace_id"], e["name"], refresh_flagged=done)
+            if e.get("parent"):
+                tell(e["parent"], f"{e['name']} ({e.get('title', '')}) is at {tokens // 1000}k tokens after "
+                                  f"{done} compactions. Refresh it now: have it write handoff.md, then start a "
+                                  "new lead from that file.")
+            else:  # a chief of staff: reset it and re-brief it from its own state files
+                self.reset_cos(tokens)
+
+    def reset_cos(self, tokens):
+        e = self.e
+        sdir = space_dir(e["workspace_id"])
+        cmd = "/clear" if e["model"]["vendor"] == "claude" else "/new"
+        herdr("agent", "prompt", e["name"], cmd, check=False)
+        time.sleep(3)
+        reg_update(e["workspace_id"], e["name"], compactions=0, refresh_flagged=None, resets=time.time())
+        submit(e["name"], f"""Your context was reset because it reached {tokens // 1000}k tokens. You are {e['name']},
+the chief of staff for herdr space {e['workspace_id']}. Your role is in your system prompt.
+Rebuild your picture from your state files, not from memory: {sdir}/roster.md, {sdir}/decisions.md,
+{sdir}/charters/, {sdir}/preferences.md, and the registry in {sdir}/agents/. Check each live lead
+with `herdr agent get <name>`. Then show the user a status of at most 5 lines, including any
+open "Needs you" items.""")
+        log(f"context {e['name']}: reset and re-briefed after {tokens} tokens")
+
     def tick(self):
         e, now = self.e, time.time()
+        try:
+            self.check_context(e.get("_last_status"), e.get("_status_at", now))
+        except Exception as err:  # noqa: BLE001
+            log(f"watch {e['name']}: context check: {err}")
         if not e.get("parent"):  # a chief of staff: herdr alerts the user itself; only resume sync here
             return
         if now - self.last_alive_check >= 60:
