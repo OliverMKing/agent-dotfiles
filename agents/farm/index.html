@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Farm</title>
+<style>
+:root {
+  --sky-top: #8ecdf2; --sky-bottom: #d9f0fb;
+  --grass: #7cbf5a; --grass-dark: #5e9f40; --soil: #a8794f; --soil-dark: #8a6039;
+  --fence: #c99a63; --ink: #2f2a22; --muted: #6c6355; --card: #fffaf0; --line: #e7dcc7;
+  --working: #2f9e44; --idle: #868e96; --blocked: #e03131; --accent: #e8590c;
+  --font: ui-rounded, "SF Pro Rounded", "Nunito", system-ui, sans-serif;
+}
+:root[data-sky="dusk"] { --sky-top: #f4a261; --sky-bottom: #fde2c0; }
+:root[data-sky="night"] {
+  --sky-top: #1d2b53; --sky-bottom: #3b4a7a; --grass: #3f6e33; --grass-dark: #2f5426;
+  --soil: #6b4f35; --soil-dark: #574029; --card: #232019; --ink: #f1ead9; --muted: #b8ad98;
+  --line: #3d372c; --fence: #8c6c48;
+}
+* { box-sizing: border-box; }
+html { background: var(--grass); }
+body { margin: 0; font-family: var(--font); color: var(--ink);
+  background: linear-gradient(var(--sky-top), var(--sky-bottom) 260px, var(--grass) 260px) fixed; min-height: 100vh; }
+header { padding: 20px 16px 8px; max-width: 1200px; margin: 0 auto; display: flex; flex-wrap: wrap;
+  align-items: center; gap: 12px; }
+h1 { margin: 0; font-size: 28px; letter-spacing: .5px; text-shadow: 0 1px 0 rgba(255,255,255,.5); }
+:root[data-sky="night"] h1 { text-shadow: none; }
+.sun { font-size: 34px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.chip { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px;
+  font-size: 13px; color: var(--muted); }
+.chip b { color: var(--ink); }
+.chip.alert { border-color: var(--blocked); color: var(--blocked); }
+main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid; gap: 22px; }
+.empty { background: var(--card); border-radius: 16px; padding: 32px; text-align: center; color: var(--muted); }
+
+/* needs-you board */
+.needs { background: #fff4e6; color: #2f2a22; border-bottom: 3px solid var(--accent); padding: 10px 14px; display: grid; gap: 8px; }
+.needs h3 { margin: 0; font-size: 14px; color: var(--accent); }
+.ask { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 13px; }
+.ask .id { font-weight: 800; color: var(--accent); }
+.ask .meta { grid-column: 2; color: #6c6355; font-size: 12px; }
+.ask .p1 { color: var(--blocked); }
+
+/* a space = a field */
+.field { background: var(--grass); border-radius: 20px; overflow: hidden; border: 3px solid var(--grass-dark);
+  box-shadow: 0 6px 0 var(--grass-dark); }
+.field-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  background: linear-gradient(var(--grass-dark), var(--grass)); color: #fff; }
+.field-head h2 { margin: 0; font-size: 18px; }
+.field-head .sub { font-size: 12px; opacity: .85; }
+.field-body { display: grid; grid-template-columns: minmax(150px, 210px) 1fr; gap: 14px; padding: 14px; }
+@media (max-width: 720px) { .field-body { grid-template-columns: 1fr; } }
+
+.farmhouse { background: var(--card); border-radius: 14px; border: 2px solid var(--line); padding: 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+.house { font-size: 54px; line-height: 1; }
+.plots { display: flex; flex-wrap: wrap; gap: 14px; align-content: flex-start; }
+.fallow { color: #fff; opacity: .85; font-size: 14px; padding: 18px; }
+
+/* a farmer's plot: fenced soil with crop rows */
+.plot { position: relative; flex: 1 1 260px; max-width: 420px; min-height: 170px; border-radius: 12px;
+  border: 4px dashed var(--fence);
+  background: repeating-linear-gradient(0deg, var(--soil) 0 14px, var(--soil-dark) 14px 18px);
+  padding: 10px 10px 12px; }
+.sign { background: var(--card); border: 2px solid var(--fence); border-radius: 8px; padding: 5px 9px;
+  font-size: 12px; font-weight: 700; display: inline-block; max-width: 100%; box-shadow: 0 2px 0 var(--fence); }
+.sign small { display: block; font-weight: 400; color: var(--muted); }
+.crew { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-top: 12px; }
+
+/* characters */
+.who { position: relative; background: none; border: 0; padding: 4px 4px 0; cursor: pointer; color: inherit;
+  font: inherit; display: flex; flex-direction: column; align-items: center; gap: 2px; border-radius: 10px; }
+.who:hover, .who:focus-visible { background: rgba(255,255,255,.25); outline: none; }
+.who .sprite { font-size: 40px; line-height: 1; display: inline-block; }
+.who.small .sprite { font-size: 30px; }
+.who .name { font-size: 11px; font-weight: 700; background: rgba(255,250,240,.92); color: #2f2a22;
+  border-radius: 6px; padding: 1px 6px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who .bubble { position: absolute; top: -6px; right: -4px; font-size: 16px; }
+.who.working .sprite { animation: bob .9s ease-in-out infinite; }
+.who.working.small .sprite { animation: trot 1.4s ease-in-out infinite; }
+.who.idle .sprite, .who.done .sprite { filter: saturate(.7); }
+.who.idle .bubble, .who.done .bubble { animation: float 2.6s ease-in-out infinite; }
+.who.blocked .bubble { animation: pulse .8s ease-in-out infinite; }
+.who.blocked .name { background: var(--blocked); color: #fff; }
+@keyframes bob { 50% { transform: translateY(-5px) rotate(-4deg); } }
+@keyframes trot { 0%,100% { transform: translateX(0) } 50% { transform: translateX(6px) scaleX(-1); } }
+@keyframes float { 0% { opacity: 0; transform: translate(0,4px); } 40% { opacity: 1; } 100% { opacity: 0; transform: translate(6px,-12px); } }
+@keyframes pulse { 50% { transform: scale(1.35); } }
+@media (prefers-reduced-motion: reduce) { .who .sprite, .who .bubble { animation: none !important; } }
+
+/* hay bale = context meter */
+.hay { width: 46px; height: 6px; border-radius: 3px; background: rgba(0,0,0,.25); overflow: hidden; }
+.hay i { display: block; height: 100%; background: #f2c94c; }
+.hay.high i { background: #e8590c; }
+
+/* drawer */
+.drawer { position: fixed; inset: 0 0 0 auto; width: min(560px, 100vw); background: var(--card); color: var(--ink);
+  border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.18); transform: translateX(105%);
+  transition: transform .2s ease; display: flex; flex-direction: column; z-index: 10; }
+.drawer.open { transform: none; }
+.drawer header { padding: 16px; border-bottom: 1px solid var(--line); margin: 0; max-width: none; }
+.drawer .big { font-size: 42px; }
+.drawer h3 { margin: 0; font-size: 18px; }
+.drawer .close { margin-left: auto; font-size: 22px; background: none; border: 0; cursor: pointer; color: var(--ink); }
+.drawer .content { padding: 14px 16px; overflow: auto; display: grid; gap: 12px; }
+.kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 10px; font-size: 13px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+.box { background: rgba(0,0,0,.04); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 13px;
+  white-space: pre-wrap; word-break: break-word; }
+:root[data-sky="night"] .box { background: rgba(255,255,255,.04); }
+pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 46vh; overflow: auto; }
+.label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+.status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.updated { font-size: 12px; color: var(--muted); padding: 0 16px 10px; max-width: 1200px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<header>
+  <span class="sun" id="sun" aria-hidden="true">☀️</span>
+  <h1>The Farm</h1>
+  <div class="chips" id="chips"></div>
+</header>
+<div class="updated" id="updated">Loading the farm…</div>
+<main id="farm"></main>
+
+<aside class="drawer" id="drawer" aria-live="polite">
+  <header>
+    <span class="big" id="d-sprite"></span>
+    <div><h3 id="d-name"></h3><div class="label" id="d-kind"></div></div>
+    <button class="close" id="d-close" aria-label="Close">✕</button>
+  </header>
+  <div class="content" id="d-content"></div>
+</aside>
+
+<script>
+const SPRITES = { leadfarmer: "👩‍🌾", farmer: "🧑‍🌾", farmhand: "🧑‍🔧",
+  horse: "🐴", dog: "🐕", goose: "🪿", cow: "🐄", pig: "🐖", sheep: "🐑", goat: "🐐", chicken: "🐔",
+  rooster: "🐓", duck: "🦆", rabbit: "🐇", donkey: "🫏", llama: "🦙", bee: "🐝", turkey: "🦃", cat: "🐈",
+  owl: "🦉", ox: "🐂", mouse: "🐁", hedgehog: "🦔", bison: "🦬", fox: "🦊", frog: "🐸", snail: "🐌" };
+const ROLE_NAME = { worker: "worker", researcher: "researcher", reviewer: "reviewer" };
+function kindLabel(a) {
+  if (a.kind === "leadfarmer") return "Lead farmer";
+  if (a.kind === "farmer") return "Farmer";
+  if (a.kind === "farmhand") return "Farmhand · started by you";
+  const animal = a.kind.charAt(0).toUpperCase() + a.kind.slice(1);
+  return [animal, a.specialty, ROLE_NAME[a.role]].filter(Boolean).join(" · ");
+}
+const BUBBLE = { working: "", idle: "💤", done: "💤", blocked: "❗", unknown: "❔" };
+let state = null, openName = null, detailTimer = null;
+
+function sky() {
+  const h = new Date().getHours();
+  const mode = h >= 20 || h < 6 ? "night" : (h >= 17 || h < 8) ? "dusk" : "day";
+  document.documentElement.dataset.sky = mode;
+  document.getElementById("sun").textContent = mode === "night" ? "🌙" : mode === "dusk" ? "🌅" : "☀️";
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function ago(ts) {
+  if (!ts) return "never";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  return s < 60 ? `${Math.round(s)}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+}
+function hay(a) {
+  if (!a.context_tokens || !a.context_window) return "";
+  const pct = Math.min(100, Math.round(100 * a.context_tokens / a.context_window));
+  return `<span class="hay ${pct >= 40 ? "high" : ""}" title="context ${pct}%"><i style="width:${pct}%"></i></span>`;
+}
+function who(a, small) {
+  const st = a.status || "unknown";
+  return `<button class="who ${small ? "small" : ""} ${st}" data-name="${esc(a.name)}"
+            title="${esc(kindLabel(a))}: ${esc(a.title || a.name)} (${st})">
+    <span class="bubble">${BUBBLE[st] ?? ""}</span>
+    <span class="sprite" aria-hidden="true">${SPRITES[a.kind] || "🐾"}</span>
+    <span class="name">${esc(a.title || a.name)}</span>${hay(a)}</button>`;
+}
+function render() {
+  const farm = document.getElementById("farm");
+  const spaces = state.spaces;
+  const all = spaces.flatMap(s => [s.lead_farmer, ...s.farmers, ...s.farmers.flatMap(f => f.animals), ...s.loose].filter(Boolean));
+  const working = all.filter(a => a.status === "working").length;
+  const blocked = all.filter(a => a.status === "blocked").length;
+  const waiting = spaces.reduce((n, s) => n + (s.waiting_messages || 0), 0);
+  const decisionCount = spaces.reduce((n, s) => n + (s.decisions || []).length, 0);
+  document.getElementById("chips").innerHTML =
+    `<span class="chip"><b>${spaces.length}</b> fields</span>` +
+    `<span class="chip"><b>${spaces.reduce((n, s) => n + s.farmers.length, 0)}</b> farmers</span>` +
+    `<span class="chip"><b>${spaces.reduce((n, s) => n + s.farmers.reduce((m, f) => m + f.animals.length, 0) + s.loose.length, 0)}</b> animals</span>` +
+    `<span class="chip"><b>${working}</b> at work</span>` +
+    (decisionCount ? `<span class="chip alert"><b>${decisionCount}</b> decisions need you</span>` : "") +
+    (blocked ? `<span class="chip alert"><b>${blocked}</b> blocked on a dialog</span>` : "") +
+    (waiting ? `<span class="chip"><b>${waiting}</b> messages waiting</span>` : "");
+  if (!spaces.length) { farm.innerHTML = `<div class="empty">No fields yet. Open a herdr space to plant one.</div>`; return; }
+  farm.innerHTML = spaces.map(s => `
+    <section class="field" aria-label="${esc(s.label)}">
+      <div class="field-head"><h2>🌾 ${esc(s.label)}</h2><span class="sub">${esc(s.id)} · ${esc(s.cwd || "")}</span></div>
+      ${(s.decisions || []).length ? `<div class="needs"><h3>🔔 Needs you · answer in the lead farmer's pane</h3>
+        ${[...s.decisions].sort((a, b) => a.priority.localeCompare(b.priority) || a.created - b.created).map(d => `
+          <div class="ask"><span class="id ${d.priority === "P1" ? "p1" : ""}">${esc(d.id)} ${esc(d.priority)}</span>
+            <span>${esc(d.question)}</span>
+            <span class="meta">from ${esc(d.lead)} · rec: <b>${esc(d.rec)}</b> · default: ${esc(d.default)} · ${ago(d.created)}</span></div>`).join("")}
+        </div>` : ""}
+      <div class="field-body">
+        <div class="farmhouse">
+          <div class="house" aria-hidden="true">🏡</div>
+          ${s.lead_farmer ? who(s.lead_farmer) : `<div class="label">no lead farmer</div>`}
+          ${s.waiting_messages ? `<div class="label">📬 ${s.waiting_messages} waiting</div>` : ""}
+        </div>
+        <div class="plots">
+          ${s.farmers.map(f => `
+            <div class="plot">
+              <div class="sign">${esc(f.title || f.name)}<small>${esc(f.name)} · ${esc(f.vendor || "")} ${esc(f.model || "")}</small></div>
+              <div class="crew">${who(f)}${f.animals.map(a => who(a, true)).join("")}</div>
+            </div>`).join("")}
+          ${s.loose.length ? `<div class="plot"><div class="sign">Roaming<small>not tied to a farmer</small></div>
+              <div class="crew">${s.loose.map(a => who(a, a.kind !== "farmhand")).join("")}</div></div>` : ""}
+          ${!s.farmers.length && !s.loose.length ? `<div class="fallow">This field is fallow. No farmers yet.</div>` : ""}
+        </div>
+      </div>
+    </section>`).join("");
+  document.getElementById("updated").textContent = `Live · updated ${new Date(state.generated * 1000).toLocaleTimeString()}`;
+}
+async function refresh() {
+  try {
+    const r = await fetch("/api/farm", { cache: "no-store" });
+    state = await r.json(); render();
+  } catch (e) { document.getElementById("updated").textContent = "Lost contact with the farm. Retrying…"; }
+}
+async function openDetail(name) {
+  openName = name;
+  const d = document.getElementById("drawer"); d.classList.add("open");
+  clearInterval(detailTimer); await loadDetail(); detailTimer = setInterval(loadDetail, 3000);
+}
+async function loadDetail() {
+  if (!openName) return;
+  const r = await fetch(`/api/agent/${encodeURIComponent(openName)}`, { cache: "no-store" });
+  const a = await r.json();
+  document.getElementById("d-sprite").textContent = SPRITES[a.kind] || "🐾";
+  document.getElementById("d-name").textContent = a.title || a.name;
+  document.getElementById("d-kind").textContent = `${kindLabel(a)} · ${a.name}`;
+  const color = { working: "var(--working)", blocked: "var(--blocked)" }[a.status] || "var(--idle)";
+  const ctx = a.context_tokens ? `${Math.round(a.context_tokens / 1000)}k / ${Math.round(a.context_window / 1000)}k` : "unknown";
+  document.getElementById("d-content").innerHTML = `
+    <div class="kv">
+      <div>Status</div><div><span class="status-dot" style="background:${color}"></span>${esc(a.status)}</div>
+      <div>Reports to</div><div>${esc(a.parent || "you")}</div>
+      <div>Model</div><div>${esc([a.vendor, a.model, a.effort && a.effort + " effort", a.tier && a.tier + " tier"].filter(Boolean).join(" · "))}</div>
+      <div>Context</div><div>${ctx}${a.compactions ? ` · compacted ${a.compactions}×` : ""}</div>
+      <div>Started</div><div>${ago(a.started)}</div>
+      <div>Last report</div><div>${ago(a.last_report)}</div>
+      <div>Pane</div><div>${esc(a.pane || "")} · ${esc(a.cwd || "")}</div>
+    </div>
+    ${a.last_report_text ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
+    <div><div class="label">Live screen</div><div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></div>`;
+}
+document.getElementById("farm").addEventListener("click", e => {
+  const b = e.target.closest(".who"); if (b) openDetail(b.dataset.name);
+});
+document.getElementById("d-close").addEventListener("click", () => {
+  openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") document.getElementById("d-close").click(); });
+sky(); setInterval(sky, 60000);
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>

@@ -9,6 +9,11 @@
   agentctl report TEXT                (any child) send TEXT to the parent agent's pane
   agentctl needs-you TEXT             (CoS) alert the user that a decision is waiting
   agentctl adopt PANE SLUG --title T  make a hand-started claude/codex pane a lead of the space's CoS
+  agentctl farm [--port 8787]         serve the live farm view in a browser
+  agentctl specialties                list specialist animals (~/agents/specialties/<name>.md)
+  agentctl ask --lead L --question Q --rec R --default D [-p P1]   (lead farmer) record a decision
+  agentctl resolve D3 --answer "..."  (lead farmer) close a decision
+  agentctl decisions                  open decisions (the "Needs you" block)
   agentctl ls                         agents in this space
 
 Roles: lead, worker, reviewer, researcher (role prompts in ~/agents/roles/).
@@ -40,7 +45,51 @@ SOCK = os.environ.get("HERDR_SOCKET_PATH", os.path.join(HOME, ".config", "herdr"
 SELF = os.path.abspath(__file__)
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 PANES_PER_TAB = 4
-COS_LABEL = "chief of staff"
+COS_LABEL = "lead farmer"          # the chief of staff, farm flavored
+COS_PREFIX = "leadfarmer-"         # agent name prefix for new lead farmers
+ANIMALS = {"worker": "horse", "researcher": "dog", "reviewer": "goose"}  # animal per child role
+SPECIES = ["cow", "pig", "sheep", "goat", "chicken", "duck", "rabbit", "donkey", "llama", "bee", "turkey", "cat"]
+SPECIALTIES = os.path.join(os.path.expanduser("~"), "agents", "specialties")  # user/agent-defined, local
+
+
+def load_specialty(name):
+    """~/agents/specialties/<name>.md: optional '---' header (role:, animal:, description:) + body."""
+    path = os.path.join(SPECIALTIES, f"{name}.md")
+    if not os.path.exists(path):
+        return None
+    text = open(path).read()
+    meta, body = {}, text
+    if text.startswith("---"):
+        head, _, body = text[3:].partition("\n---")
+        for line in head.splitlines():
+            k, _, v = line.partition(":")
+            if k.strip():
+                meta[k.strip().lower()] = v.strip()
+    return {"name": name, "meta": meta, "body": body.strip(), "path": path}
+
+
+def animal_for(role, specialty=None):
+    """Children are animals: a specialty gets its declared species, or a stable one from its name."""
+    if role not in ANIMALS:
+        return None
+    if specialty:
+        spec = load_specialty(specialty) or {"meta": {}}
+        want = spec["meta"].get("animal", "").lower()
+        if want:
+            return want
+        return SPECIES[sum(map(ord, specialty)) % len(SPECIES)]
+    return ANIMALS[role]
+
+
+def cos_name(wid):
+    """The lead farmer of a space: whatever space.json recorded (older spaces use cos-<wid>)."""
+    try:
+        name = json.load(open(os.path.join(SPACES, wid, "space.json"))).get("cos")
+        if name:
+            return name
+    except (OSError, ValueError):
+        pass
+    return f"{COS_PREFIX}{wid.lower()}"
 TITLE_MAX = 40
 
 
@@ -80,6 +129,14 @@ def git_root(cwd):
     return r.stdout.strip() or cwd
 
 
+def main_repo_root(cwd):
+    """For a linked worktree, the main repository's root (Codex applies trust there)."""
+    r = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                       capture_output=True, text=True)
+    common = r.stdout.strip()
+    return os.path.dirname(common) if common.endswith("/.git") else git_root(cwd)
+
+
 def trusted_by(cwd):
     """Which vendors the user has already trusted this folder (or a parent) for."""
     out = set()
@@ -90,6 +147,8 @@ def trusted_by(cwd):
         # its git root exactly (a trusted parent only covers non-repo subfolders).
         exact = {os.path.realpath(r) for r in roots}
         root = git_root(cwd)
+        if os.path.realpath(main_repo_root(cwd)) in exact:  # worktree of a trusted repo
+            out.add("claude")
         in_repo = os.path.realpath(root) != os.path.realpath(cwd) or os.path.isdir(os.path.join(cwd, ".git"))
         if os.path.realpath(cwd) in exact or os.path.realpath(root) in exact or (not in_repo and _under(cwd, roots)):
             out.add("claude")
@@ -100,7 +159,8 @@ def trusted_by(cwd):
                            open(os.path.join(HOME, ".codex", "config.toml")).read(), re.M)
         # codex keys trust on the git root (or the folder itself); parents do not count
         root = git_root(cwd)
-        if any(os.path.realpath(r) in (os.path.realpath(root), os.path.realpath(cwd)) for r in roots):
+        cands = {os.path.realpath(x) for x in (root, cwd, main_repo_root(cwd))}
+        if any(os.path.realpath(r) in cands for r in roots):
             out.add("codex")
     except OSError:
         pass
@@ -123,19 +183,22 @@ def pick(role, tier=None, vendor=None, cwd=None):
     return {"vendor": vendor, "model": m["model"], "effort": m["effort"], "tier": tier}
 
 
-def role_text(role):
-    """The role prompt plus the user's personal context file, if present."""
+def role_text(role, specialty=None):
+    """The role prompt, the specialty (if any), and the user's personal context file, if present."""
     text = open(os.path.join(ROLES, f"{role}.md")).read()
+    spec = load_specialty(specialty) if specialty else None
+    if spec:
+        text += f"\n\n# Your specialty: {specialty}\n\n{spec['body']}\n"
     if os.path.exists(CONTEXT):
         text += "\n\n# User context\n\n" + open(CONTEXT).read()
     return text
 
 
-def role_file(role):
+def role_file(role, specialty=None):
     os.makedirs(BUILD, exist_ok=True)
-    path = os.path.join(BUILD, f"{role}.md")
+    path = os.path.join(BUILD, f"{role}{'-' + specialty if specialty else ''}.md")
     with open(path, "w") as f:
-        f.write(role_text(role))
+        f.write(role_text(role, specialty))
     return path
 
 
@@ -160,11 +223,11 @@ def read_only_settings(outdir, cwd):
     return path
 
 
-def agent_args(role, choice, cwd=None, outdir=None):
+def agent_args(role, choice, cwd=None, outdir=None, specialty=None):
     read_only = role in READ_ONLY_ROLES
     if choice["vendor"] == "claude":
         a = ["--model", choice["model"], "--effort", choice["effort"], "--permission-mode", "auto",
-             "--settings", SETTINGS, "--append-system-prompt-file", role_file(role)]
+             "--settings", SETTINGS, "--append-system-prompt-file", role_file(role, specialty)]
         if read_only:
             # Hard confinement: per-agent settings deny edits to the repo (also covers Bash
             # redirects / tee / file commands) and block tool writes outside the working dirs,
@@ -182,10 +245,10 @@ def agent_args(role, choice, cwd=None, outdir=None):
         # The user already trusted this folder in Claude: mirror it for this session only (not saved).
         root = git_root(cwd)
         # one inline table: codex's -c splits dotted keys and can't address a quoted path key
-        paths = dict.fromkeys([root, cwd])
+        paths = dict.fromkeys([main_repo_root(cwd), root, cwd])
         trust = ["-c", "projects={" + ", ".join(f'{json.dumps(x)} = {{ trust_level = "trusted" }}' for x in paths) + "}"]
     # role prompt goes in on the command line: a sandboxed parent cannot write ~/.codex profiles
-    instructions = role_text(role) + ("\n\nYou are read-only: never edit files or apply patches.\n"
+    instructions = role_text(role, specialty) + ("\n\nYou are read-only: never edit files or apply patches.\n"
                                        if role == "reviewer" else "")
     common = ["--no-daemon", "-c", "developer_instructions=" + json.dumps(instructions), "-m", choice["model"],
               "-c", f'model_reasoning_effort="{choice["effort"]}"',
@@ -222,7 +285,8 @@ def pane_has_agent(pane_id):
     return True
 
 
-def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, outdir=None, timeout_ms=60000):
+def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, outdir=None, timeout_ms=25000,
+                specialty=None):
     """Start a random-vendor agent in pane; fall back to the other vendor if launch fails.
     Returns (state, choice): state is 'ready' or 'blocked' (e.g. trust dialog)."""
     first = pick(role, tier, vendor, cwd)
@@ -234,7 +298,7 @@ def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, outdir=None,
         for _ in range(15):
             try:
                 herdr("agent", "start", name, "--kind", choice["vendor"], "--pane", pane,
-                      "--timeout", str(timeout_ms), "--", *agent_args(role, choice, cwd, outdir))
+                      "--timeout", str(timeout_ms), "--", *agent_args(role, choice, cwd, outdir, specialty))
                 return "ready", choice
             except HerdrError as e:
                 if e.code == "agent_not_ready":
@@ -267,19 +331,20 @@ def space_dir(wid):
 
 # ------------------------------------------------------------------ CoS
 
-COS_FIRST = """You are the chief of staff for herdr space {wid} ("{label}"), started in {cwd}.
+COS_FIRST = """You are the lead farmer (chief of staff) for herdr space {wid} ("{label}"), started in {cwd}.
 Your agent name is {name}. You run on {model}. Your state directory is {sdir}.
 Read your role (system prompt). Then, in at most 4 lines: say what you infer this space is for
 (from its label, working directory, and git state if any), and ask the user what they want done here."""
 
 
 def start_cos(wid, wait_trust_ms=900000):
-    name = f"cos-{wid.lower()}"
+    name = f"{COS_PREFIX}{wid.lower()}"
     if not NAME_RE.match(name):
         raise SystemExit(f"bad workspace id for agent name: {wid}")
-    if agent_by_name(name):
-        log(f"{name} already running")
-        return name
+    for existing in (name, f"cos-{wid.lower()}"):
+        if agent_by_name(existing):
+            log(f"{existing} already running")
+            return existing
     ws = herdr("workspace", "get", wid)["workspace"]
     panes = [p for p in herdr("pane", "list", "--workspace", wid)["panes"]]
     free = [p for p in panes if not p.get("agent")]
@@ -373,12 +438,25 @@ def cmd_spawn(a):
         raise SystemExit("spawn must run inside a herdr pane")
     parent = my_name()
     slug = re.sub(r"[^a-z0-9_-]", "-", a.slug.lower()).strip("-")
+    while slug.startswith(f"{wid.lower()}-"):  # callers sometimes pass the full agent name
+        slug = slug[len(wid) + 1:]
     name = f"{wid.lower()}-{slug}"[:32]
     if not NAME_RE.match(name):
         raise SystemExit(f"invalid agent name {name}")
     if agent_by_name(name):
         raise SystemExit(f"agent {name} already exists. Children are single-use: pick a new slug "
                          "(do not send a second task to a finished child)")
+    if a.specialty:
+        a.specialty = re.sub(r"[^a-z0-9_-]", "-", a.specialty.lower()).strip("-")
+        spec = load_specialty(a.specialty)
+        if not spec:
+            raise SystemExit(f"no specialty {a.specialty!r}: write {SPECIALTIES}/{a.specialty}.md first "
+                             "(see `agentctl specialties`)")
+        base = spec["meta"].get("role")
+        if base and base != a.role:
+            raise SystemExit(f"specialty {a.specialty} is defined for role {base}, not {a.role}")
+        if a.role == "lead":
+            raise SystemExit("specialties are for animals (worker, researcher, reviewer), not farmers")
     task = a.task if a.task != "-" else sys.stdin.read()
     cwd = os.path.abspath(os.path.expanduser(a.cwd or os.getcwd()))
     outdir = None
@@ -397,8 +475,16 @@ def cmd_spawn(a):
         raise SystemExit(f"--title is {len(title)} chars; keep it to {TITLE_MAX} so the tab label is not cut off "
                          "(verb + object, e.g. 'review auth token refresh PR')")
     pane = place_pane(wid, a.role, slug, title, parent, cwd, env)
+    # visible from the start: a spawn that is cut off still leaves a registry entry
+    reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
+               outdir=outdir, specialty=a.specialty, animal=animal_for(a.role, a.specialty),
+               started=time.time(), last_report=0, state="starting")
+    pending_file = os.path.join(space_dir(wid), f"pending-task-{name}.md")
+    extra = OUTDIR_NOTE.format(outdir=outdir, cwd=cwd) if outdir else ""
+    with open(pending_file, "w") as f:  # kept until the task is submitted, for send-pending
+        f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
     try:
-        state, choice = start_agent(name, pane, a.role, a.tier, a.vendor, cwd, outdir)
+        state, choice = start_agent(name, pane, a.role, a.tier, a.vendor, cwd, outdir, specialty=a.specialty)
     except Exception:
         # do not leave a tab with only a terminal behind (it confuses the user and the parent)
         info = herdr("pane", "get", pane, check=False).get("pane") or {}
@@ -409,12 +495,14 @@ def cmd_spawn(a):
         else:
             herdr("pane", "close", pane, check=False)
         raise
-    out = {"outdir": outdir, "name": name, "title": title, "pane": pane, "role": a.role, "parent": parent, "cwd": cwd,
+    out = {"animal": animal_for(a.role, a.specialty), "specialty": a.specialty, "outdir": outdir, "name": name,
+           "title": title, "pane": pane, "role": a.role, "parent": parent, "cwd": cwd,
            "model": choice}
     if state == "blocked":
         screen = herdr("agent", "read", name, "--source", "visible", check=False)
         reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
-                   model=choice, outdir=outdir, started=time.time(), last_report=0, state="pending")
+                   model=choice, outdir=outdir, specialty=a.specialty, animal=animal_for(a.role, a.specialty),
+                   started=time.time(), last_report=0, state="pending")
         out.update(status="blocked_at_startup", hint="Likely a folder-trust dialog. Ask the user to answer it in "
                    f"pane {pane}; then run: agentctl send-pending {name}.",
                    screen=str(screen.get("read", screen))[-800:])
@@ -422,9 +510,11 @@ def cmd_spawn(a):
             f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
         print(json.dumps(out, indent=1))
         sys.exit(3)
-    submit(name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
+    submit(name, open(pending_file).read())
+    os.remove(pending_file)
     reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
-               model=choice, outdir=outdir, started=time.time(), last_report=0, state="running")
+               model=choice, outdir=outdir, specialty=a.specialty, animal=animal_for(a.role, a.specialty),
+               started=time.time(), last_report=0, state="running")
     out["status"] = "started"
     print(json.dumps(out, indent=1))
 
@@ -463,12 +553,95 @@ def cmd_report(a):
                     final=a.final, space=space)
     if space and me != "?":
         try:
-            reg_update(space, me, last_report=time.time())
+            reg_update(space, me, last_report=time.time(), last_report_text=text[:600])
         except OSError:
             pass  # sandboxed: the watcher records the report when it delivers it
     print(json.dumps({"queued_for": parent, "via": where,
                       "note": "delivered when the parent has no draft in its input box"
                               + ("; your pane closes after delivery" if a.final else "")}))
+
+
+# ------------------------------------------------------------------ decisions (structured "Needs you")
+
+def decisions_path(wid):
+    return os.path.join(space_dir(wid), "decisions.json")
+
+
+def load_decisions(wid):
+    try:
+        return json.load(open(decisions_path(wid)))
+    except (OSError, ValueError):
+        return {"next": 1, "items": []}
+
+
+def save_decisions(wid, d):
+    tmp = decisions_path(wid) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=1)
+    os.replace(tmp, decisions_path(wid))
+    open_items = [i for i in d["items"] if i["status"] == "open"]
+    # show the count in herdr's sidebar on the lead farmer's pane
+    lf = agent_by_name(cos_name(wid))
+    if lf:
+        title = f"{COS_LABEL} · needs you: {len(open_items)}" if open_items else f"{COS_LABEL} · all clear"
+        herdr("pane", "report-metadata", lf["pane_id"], "--source", "agentctl-decisions", "--title", title,
+              "--seq", str(time.time_ns()), check=False)
+
+
+def _space_from_env():
+    wid = os.environ.get("HERDR_WORKSPACE_ID") or os.environ.get("AGENT_SPACE")
+    if not wid:
+        raise SystemExit("run inside a herdr pane (HERDR_WORKSPACE_ID unset)")
+    return wid
+
+
+def format_decisions(items):
+    order = {"P1": 0, "P2": 1, "P3": 2}
+    items = sorted(items, key=lambda i: (order.get(i["priority"], 9), i["created"]))
+    if not items:
+        return "Nothing needs you."
+    lines = ["Needs you:"]
+    for i in items:
+        lines.append(f" {i['id']} {i['priority']} {i['lead']}: {i['question']}")
+        lines.append(f"    rec: {i['rec']}   default: {i['default']}" + (f"   ({i['evidence']})" if i.get("evidence") else ""))
+    return "\n".join(lines)
+
+
+def cmd_ask(a):
+    """The lead farmer records a decision for the user; agentctl assigns the ID and raises the alert."""
+    wid = _space_from_env()
+    d = load_decisions(wid)
+    item = {"id": f"D{d['next']}", "priority": a.priority, "lead": a.lead, "question": a.question,
+            "rec": a.rec, "default": a.default, "evidence": a.evidence, "created": time.time(), "status": "open"}
+    d["next"] += 1
+    d["items"].append(item)
+    save_decisions(wid, d)
+    label = (herdr("workspace", "get", wid, check=False).get("workspace") or {}).get("label") or wid
+    herdr("notification", "show", f"Lead farmer · {label}: needs you",
+          "--body", f"{item['id']} {item['priority']} {item['lead']}: {item['question']}"[:300],
+          "--sound", "request", check=False)
+    print(json.dumps(item))
+
+
+def cmd_resolve(a):
+    wid = _space_from_env()
+    d = load_decisions(wid)
+    for i in d["items"]:
+        if i["id"].lower() == a.id.lower() and i["status"] == "open":
+            i.update(status="withdrawn" if a.withdraw else "answered", answer=a.answer, resolved=time.time())
+            save_decisions(wid, d)
+            print(json.dumps(i))
+            return
+    raise SystemExit(f"no open decision {a.id}")
+
+
+def cmd_decisions(a):
+    wid = _space_from_env()
+    items = load_decisions(wid)["items"]
+    if a.all:
+        print(json.dumps(items, indent=1))
+    else:
+        print(format_decisions([i for i in items if i["status"] == "open"]))
 
 
 def cmd_needs_you(a):
@@ -481,7 +654,7 @@ def cmd_needs_you(a):
         except HerdrError:
             pass
     text = a.text if a.text != "-" else sys.stdin.read()
-    r = herdr("notification", "show", f"Chief of staff · {label}: needs you", "--body", text[:300],
+    r = herdr("notification", "show", f"Lead farmer · {label}: needs you", "--body", text[:300],
               "--sound", "request", check=False)
     print(json.dumps({"shown": r.get("shown"), "reason": r.get("reason")}))
 
@@ -494,7 +667,7 @@ def cmd_adopt(a):
     vendor = pane.get("agent")
     if vendor not in ("claude", "codex"):
         raise SystemExit(f"pane {a.pane} runs {vendor!r}; only claude and codex can be adopted")
-    cos = f"cos-{wid.lower()}"
+    cos = cos_name(wid)
     slug = re.sub(r"[^a-z0-9_-]", "-", a.slug.lower()).strip("-")
     name = f"{wid.lower()}-{slug}"[:32]
     title = " ".join(a.title.split())
@@ -546,13 +719,145 @@ def cmd_resume(a):
     if os.environ.get("HERDR_PANE_ID"):
         reg_update(wid, a.name, pane=os.environ["HERDR_PANE_ID"], resumed=time.time())
     # adopted agents (started by hand, see `adopt`) keep their own launch options
-    args = entry["launch_args"] if entry.get("launch_args") is not None else agent_args(role, choice, cwd, outdir)
+    args = entry["launch_args"] if entry.get("launch_args") is not None else agent_args(role, choice, cwd, outdir,
+                                                                                         entry.get("specialty"))
     if choice["vendor"] == "claude":
         argv = ["claude", "--resume", a.session_id, *args]
     else:
         argv = ["codex", "resume", a.session_id, *args]
     log(f"resume {a.name}: {choice['vendor']} {choice['model']} session {a.session_id[:8]}")
     os.execvp(argv[0], argv)
+
+
+# ------------------------------------------------------------------ the farm (live web view)
+
+def _farm_agent(live, reg, kind):
+    m = reg.get("model") or {}
+    return {"name": live.get("name") or live.get("pane_id"), "kind": kind,
+            "status": live.get("agent_status", "unknown"), "title": reg.get("title"),
+            "vendor": m.get("vendor") or live.get("agent"), "model": m.get("model"), "effort": m.get("effort"),
+            "tier": m.get("tier"), "context_tokens": reg.get("context_tokens"),
+            "context_window": reg.get("context_window"), "compactions": reg.get("compactions", 0),
+            "last_report": reg.get("last_report"), "last_report_text": reg.get("last_report_text"),
+            "parent": reg.get("parent"), "pane": live.get("pane_id"), "cwd": live.get("cwd") or reg.get("cwd"),
+            "started": reg.get("started")}
+
+
+def farm_state():
+    agents = herdr("agent", "list")["agents"]
+    reg = {e["name"]: e for e in reg_all() if e.get("name")}
+    inbox_counts = {}
+    if os.path.isdir(INBOX):
+        for fn in os.listdir(INBOX):
+            if fn.endswith(".jsonl"):
+                try:
+                    inbox_counts[fn[:-6]] = sum(1 for l in open(os.path.join(INBOX, fn)) if l.strip())
+                except OSError:
+                    pass
+    spaces = []
+    for w in herdr("workspace", "list")["workspaces"]:
+        wid = w["workspace_id"]
+        here = [a for a in agents if a["workspace_id"] == wid]
+        lf_names = {cos_name(wid), f"cos-{wid.lower()}", f"{COS_PREFIX}{wid.lower()}"}
+        lead_farmer, farmers, loose = None, [], []
+        for a in here:
+            r = reg.get(a.get("name") or "", {})
+            if a.get("name") in lf_names:
+                lead_farmer = _farm_agent(a, r | {"title": COS_LABEL}, "leadfarmer")
+            elif r.get("role") == "lead":
+                farmers.append(_farm_agent(a, r, "farmer") | {"animals": []})
+        by_name = {f["name"]: f for f in farmers}
+        for a in here:
+            r = reg.get(a.get("name") or "", {})
+            if a.get("name") in lf_names or r.get("role") == "lead":
+                continue
+            if r.get("role") in ANIMALS:
+                animal = _farm_agent(a, r, r.get("animal") or ANIMALS[r["role"]]) | {
+                    "specialty": r.get("specialty"), "role": r.get("role")}
+                (by_name[r["parent"]]["animals"] if r.get("parent") in by_name else loose).append(animal)
+            else:
+                loose.append(_farm_agent(a, r, "farmhand"))
+        try:
+            cwd = json.load(open(os.path.join(SPACES, wid, "space.json"))).get("cwd")
+        except (OSError, ValueError):
+            cwd = None
+        open_decisions = [i for i in load_decisions(wid)["items"] if i["status"] == "open"] \
+            if os.path.isdir(os.path.join(SPACES, wid)) else []
+        spaces.append({"id": wid, "label": w.get("label") or wid, "cwd": cwd, "lead_farmer": lead_farmer,
+                       "decisions": open_decisions,
+                       "farmers": farmers, "loose": loose,
+                       "waiting_messages": sum(inbox_counts.get(a.get("name") or "", 0) for a in here)})
+    return {"generated": time.time(), "spaces": spaces}
+
+
+def farm_agent_detail(name):
+    for space in farm_state()["spaces"]:
+        for a in [space["lead_farmer"], *space["farmers"], *[x for f in space["farmers"] for x in f["animals"]],
+                  *space["loose"]]:
+            if a and a["name"] == name:
+                r = herdr("agent", "read", name, "--source", "visible", check=False)
+                lines = [l.rstrip() for l in str(r.get("raw", "")).splitlines()]
+                while lines and not lines[-1]:
+                    lines.pop()
+                return dict(a, screen="\n".join(lines[-45:]))
+    return {"name": name, "kind": "?", "status": "gone", "screen": "This agent is no longer on the farm."}
+
+
+def cmd_farm(a):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import unquote
+    page = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "farm", "index.html")
+    cache = {"t": 0, "body": b""}
+    lock = threading.Lock()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def _send(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            try:
+                if self.path in ("/", "/index.html"):
+                    self._send(200, open(page, "rb").read(), "text/html; charset=utf-8")
+                elif self.path == "/api/farm":
+                    with lock:
+                        if time.time() - cache["t"] > 2:
+                            cache["body"], cache["t"] = json.dumps(farm_state()).encode(), time.time()
+                        body = cache["body"]
+                    self._send(200, body, "application/json")
+                elif self.path.startswith("/api/agent/"):
+                    name = unquote(self.path[len("/api/agent/"):])
+                    self._send(200, json.dumps(farm_agent_detail(name)).encode(), "application/json")
+                else:
+                    self._send(404, b"not found", "text/plain")
+            except Exception as err:  # noqa: BLE001
+                self._send(500, json.dumps({"error": str(err)}).encode(), "application/json")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
+    log(f"the farm is open at http://127.0.0.1:{a.port}")
+    srv.serve_forever()
+
+
+def cmd_specialties(a):
+    os.makedirs(SPECIALTIES, exist_ok=True)
+    names = sorted(f[:-3] for f in os.listdir(SPECIALTIES) if f.endswith(".md"))
+    if not names:
+        print(f"No specialties yet. Define one in {SPECIALTIES}/<name>.md, for example:\n")
+        print("---\nrole: researcher\nanimal: owl\ndescription: Answers telemetry questions with KQL\n---\n"
+              "Focus, tools and skills to use, sources to trust, and the exact output format.")
+        return
+    for n in names:
+        spec = load_specialty(n)
+        m = spec["meta"]
+        print(f"{n:<24} {m.get('role', 'any'):<11} {animal_for(m.get('role') or 'worker', n):<8} "
+              f"{m.get('description', '')}")
 
 
 def cmd_ls(a):
@@ -683,7 +988,8 @@ def drain_outboxes():
                             f.write(json.dumps(m) + "\n")
                         if m.get("space") and m.get("from"):
                             try:
-                                reg_update(m["space"], m["from"], last_report=m["ts"])
+                                reg_update(m["space"], m["from"], last_report=m["ts"],
+                                           last_report_text=m["text"][:600])
                             except OSError:
                                 pass
                 os.remove(tmp)
@@ -1039,7 +1345,7 @@ class ChildWatch(threading.Thread):
         time.sleep(3)
         reg_update(e["workspace_id"], e["name"], compactions=0, refresh_flagged=None, resets=time.time())
         submit(e["name"], f"""Your context was reset because it reached {tokens // 1000}k tokens. You are {e['name']},
-the chief of staff for herdr space {e['workspace_id']}. Your role is in your system prompt.
+the lead farmer (chief of staff) for herdr space {e['workspace_id']}. Your role is in your system prompt.
 Rebuild your picture from your state files, not from memory: {sdir}/roster.md, {sdir}/decisions.md,
 {sdir}/charters/, {sdir}/preferences.md, and the registry in {sdir}/agents/. Check each live lead
 with `herdr agent get <name>`. Then show the user a status of at most 5 lines, including any
@@ -1095,6 +1401,19 @@ def watchdog_loop():
         try:
             for e in reg_all():
                 key = e.get("name")
+                if e.get("state") == "starting" and time.time() - e.get("started", 0) > 180:
+                    live = agent_by_name(key) if key else None
+                    if not live:
+                        reg_update(e["workspace_id"], key, state="failed", ended=time.time())
+                        continue
+                    if live["agent_status"] in ("blocked", "unknown"):
+                        reg_update(e["workspace_id"], key, state="pending")
+                        tell(e.get("parent"), f"{key} ({e.get('title', '')}) is stuck at a startup dialog in pane "
+                                              f"{live['pane_id']} (usually folder trust): {screen_tail(key)}. Ask "
+                                              f"the user to answer it, then run: agentctl send-pending {key}")
+                    else:
+                        reg_update(e["workspace_id"], key, state="running")
+                    continue
                 if e.get("state") == "running" and key not in watching and e.get("pane"):
                     live = agent_by_name(key)
                     if not live:
@@ -1128,7 +1447,7 @@ def on_pane_gone(pane_id, exited):
         except (OSError, ValueError):
             continue
         if meta.get("pane") == pane_id and exited:
-            herdr("notification", "show", f"Chief of staff exited ({meta.get('label') or wid})",
+            herdr("notification", "show", f"Lead farmer exited ({meta.get('label') or wid})",
                   "--body", f"{meta.get('cos')} in pane {pane_id} exited. Restart: agentctl start-cos {wid}",
                   "--sound", "request", check=False)
 
@@ -1186,7 +1505,7 @@ def backfill_cos(seen):
             wid = w["workspace_id"]
             mine = [p for p in panes if p["workspace_id"] == wid]
             fresh = w.get("tab_count") == 1 and len(mine) == 1 and not mine[0].get("agent")
-            has_cos = any(a.get("name") == f"cos-{wid.lower()}" for a in agents)
+            has_cos = any(a.get("name") in (f"cos-{wid.lower()}", f"{COS_PREFIX}{wid.lower()}") for a in agents)
             if fresh and not has_cos and wid not in seen:
                 seen.add(wid)
                 log(f"{wid}: backfill (created while the watcher was down)")
@@ -1219,7 +1538,10 @@ def main():
     x.add_argument("--tier", choices=["light", "standard", "heavy"],
                    help="light=lookups/mechanical, standard=default, heavy=hard debugging/design/RCA/security")
     x.add_argument("--vendor", choices=["claude", "codex"], help="force a vendor (default: random)")
+    x.add_argument("--specialty", help="a specialist defined in ~/agents/specialties/<name>.md (animals only)")
     x.set_defaults(f=cmd_spawn)
+    x = s.add_parser("specialties", help="list specialist animals defined in ~/agents/specialties")
+    x.set_defaults(f=cmd_specialties)
     x = s.add_parser("send-pending"); x.add_argument("name"); x.set_defaults(f=cmd_send_pending)
     x = s.add_parser("report"); x.add_argument("text")
     x.add_argument("--as", dest="as_name", help="report as this registered agent (adopted agents)")
@@ -1233,6 +1555,20 @@ def main():
     x.add_argument("--workspace"); x.set_defaults(f=cmd_adopt)
     x = s.add_parser("resume", help="(herdr) relaunch an agent after a server restart")
     x.add_argument("name"); x.add_argument("session_id"); x.set_defaults(f=cmd_resume)
+    x = s.add_parser("ask", help="(lead farmer) record a decision for the user; prints its ID")
+    x.add_argument("--lead", required=True, help="who asked (farmer name, or 'lead farmer')")
+    x.add_argument("-p", "--priority", choices=["P1", "P2", "P3"], default="P2")
+    x.add_argument("--question", required=True); x.add_argument("--rec", required=True)
+    x.add_argument("--default", required=True); x.add_argument("--evidence")
+    x.set_defaults(f=cmd_ask)
+    x = s.add_parser("resolve", help="(lead farmer) close a decision with the user's answer")
+    x.add_argument("id"); x.add_argument("--answer", required=True)
+    x.add_argument("--withdraw", action="store_true", help="the question became moot")
+    x.set_defaults(f=cmd_resolve)
+    x = s.add_parser("decisions", help="print open decisions (the Needs you block)")
+    x.add_argument("--all", action="store_true"); x.set_defaults(f=cmd_decisions)
+    x = s.add_parser("farm", help="serve the live farm view (http://127.0.0.1:8787)")
+    x.add_argument("--port", type=int, default=8787); x.set_defaults(f=cmd_farm)
     x = s.add_parser("needs-you", help="(CoS) alert the user that a decision is waiting")
     x.add_argument("text"); x.set_defaults(f=cmd_needs_you)
     a = p.parse_args()

@@ -1,6 +1,17 @@
 # agent-dotfiles
 
-This repository holds a multi-agent setup for [herdr](https://herdr.dev). Each herdr space (workspace) gets its own chief of staff (CoS) agent. The CoS plans the work in its space, and it starts and stops lead agents for that work. Each agent uses Claude Code or Codex at random, with a model that matches the task difficulty. The repository also adds herdr quick actions to open VS Code and to review code changes with a file viewer and the pi coding agent.
+This repository holds a farm-flavored multi-agent setup for [herdr](https://herdr.dev). Each herdr space (workspace) is a field. Each field gets its own lead farmer, which is a chief of staff (CoS) agent. The lead farmer plans the work in its field, and it starts and stops farmers (lead agents) for that work. Farmers give bounded tasks to animals (single-use child agents).
+
+| Farm name | Agent role | `agentctl` role | Animal on the farm page |
+|---|---|---|---|
+| Lead farmer | Chief of staff, one for each space | `chief-of-staff` | 👩‍🌾 at the farmhouse |
+| Farmer | Lead for one area of work | `lead` | 🧑‍🌾 in a plot |
+| Horse | Worker that changes something | `worker` | 🐴 |
+| Dog | Researcher that finds something out (read-only) | `researcher` | 🐕 |
+| Goose | Reviewer that checks a change (read-only) | `reviewer` | 🪿 |
+| Specialist animal | A worker, researcher or reviewer with a specialty | the base role | its own species |
+
+In this README, "CoS" and "lead farmer" mean the same agent, and "lead" and "farmer" mean the same agent. Each agent uses Claude Code or Codex at random, with a model that matches the task difficulty. The repository also adds herdr quick actions to open VS Code and to review code changes with a file viewer and the pi coding agent.
 
 ## Requirements
 
@@ -24,11 +35,40 @@ The install script does these steps:
 - It adds the key bindings from `herdr/keys.toml` to your herdr config one time, after a backup.
 - It copies the pi provider config to `~/.pi/agent/` if you do not have one, and it installs the herdr pi integration.
 
+## The farm page
+
+The `herdr-farm` service serves a live view at http://127.0.0.1:8787. It listens only on your machine, because it shows agent screens.
+
+- Each space is a field with a farmhouse for its lead farmer and a fenced plot for each farmer. The animals of a farmer stand in its plot.
+- An agent bobs or trots when it works, shows 💤 when it is idle, and shows ❗ when it is blocked on a dialog.
+- The bar under an agent is a hay bale that shows how full its context is.
+- A "Needs you" board at the top of a field lists the open decisions of that space.
+- Click an agent to see its task, last report, model, context and live screen.
+
+## Decisions
+
+The lead farmer records each question for you with `agentctl ask`. `agentctl` assigns the ID (D1, D2 and so on), shows a herdr notification, shows the count in the pane title of the lead farmer ("lead farmer · needs you: 2"), and lists the question on the farm page. Answer in the pane of the lead farmer, for example `D1 yes`. The lead farmer forwards your answer and closes the item with `agentctl resolve`. It ends every turn with the output of `agentctl decisions`, so the open questions are always the last lines in its pane.
+
+## Specialist animals
+
+A specialty is a reusable specialist, for example a telemetry analyst or a CI babysitter. Define it one time in `~/agents/specialties/<name>.md`:
+
+```
+---
+role: researcher
+animal: owl
+description: Answers telemetry questions with KQL
+---
+Focus, tools and skills to use, sources to trust, and the exact output format.
+```
+
+Start it with `agentctl spawn researcher <slug> --specialty <name> ...`. The specialty adds its text to the role prompt. It never adds permissions, because the base role sets them. If the file names no animal, `agentctl` picks a species from the name, so the same specialist always looks the same. `agentctl specialties` lists the specialties.
+
 ## How the chief of staff works
 
 To convert a space that existed before the service started, run `agentctl adopt` for each agent that you started by hand, then run `agentctl start-cos <workspace>`. Then tell the chief of staff about the adopted leads. If the space has no free pane, open a new tab first.
 
-The service runs `agentctl watch`. The watcher listens for the herdr `workspace_created` event. For each new space, it starts an agent in the first pane and labels that tab `chief of staff`.
+The service runs `agentctl watch`. The watcher listens for the herdr `workspace_created` event. For each new space, it starts an agent in the first pane and labels that tab `lead farmer`.
 
 - The CoS works only in its own space. It ignores other spaces.
 - The CoS decides which leads the space needs. It can start, expand, split, merge or retire a lead at any time.
@@ -130,6 +170,11 @@ The review action writes the diff against the merge base with the default branch
 | `agentctl needs-you "<text>"` | Alert the user that a decision is waiting |
 | `agentctl adopt <pane> <slug> --title "<task>"` | Make an agent that you started by hand a lead of the space's CoS. It keeps its own launch options when herdr resumes it. |
 | `agentctl report --as <name> "<text>"` | Send a report as an adopted agent, whose shell can lack the `AGENT_*` environment |
+| `agentctl ask --lead <who> --question "..." --rec "..." --default "..."` | Record a decision for you (the lead farmer uses this) |
+| `agentctl resolve D<n> --answer "..."` | Close a decision |
+| `agentctl decisions` | Print the open decisions |
+| `agentctl specialties` | List specialist animals |
+| `agentctl farm` | Serve the farm page (the `herdr-farm` service runs it) |
 | `agentctl ls` | List the agents in the current space |
 | `agentctl resume <agent> <session-id>` | Start an agent again with its full settings (herdr runs this after a restart) |
 | `systemctl --user stop herdr-space-cos` | Stop new spaces from getting a CoS |
@@ -146,7 +191,8 @@ The review action writes the diff against the merge base with the default branch
 | `herdr/quick-actions/` | The herdr plugin for the VS Code and review actions |
 | `herdr/keys.toml` | Key bindings that `install.sh` adds to your herdr config |
 | `pi/` | pi providers for the copilot-api proxy |
-| `systemd/` | The watcher service |
+| `agents/farm/index.html` | The farm page |
+| `systemd/` | The watcher service and the farm service |
 | `install.sh` | The install script |
 
 Runtime state stays in `~/agents` and is not in git: `context.md`, `spaces/<workspace>/` (roster, decisions and preferences) and `.build/` (merged role prompts).

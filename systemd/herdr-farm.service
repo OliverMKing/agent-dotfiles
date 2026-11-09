@@ -1,0 +1,12 @@
+[Unit]
+Description=Live farm view of herdr agents (http://127.0.0.1:8787)
+
+[Service]
+Environment=HERDR_SOCKET_PATH=%h/.config/herdr/herdr.sock
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/agents/bin/agentctl farm --port 8787
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -20,8 +20,8 @@ for tool in claude codex pi; do have "$tool" || warn "$tool not found; agents of
 
 # 1. ~/agents -> repo (state, personal context and build output stay local)
 say "linking $AGENTS_HOME to $REPO/agents"
-mkdir -p "$AGENTS_HOME/spaces"
-for item in bin roles models.json settings.json context.example.md; do
+mkdir -p "$AGENTS_HOME/spaces" "$AGENTS_HOME/specialties"
+for item in bin roles farm models.json settings.json context.example.md; do
   dst="$AGENTS_HOME/$item"
   if [ -e "$dst" ] && [ ! -L "$dst" ]; then mv "$dst" "$dst.bak-$STAMP"; warn "moved old $dst to $dst.bak-$STAMP"; fi
   ln -sfn "$REPO/agents/$item" "$dst"
@@ -39,10 +39,10 @@ fi
 if have systemctl && systemctl --user show-environment >/dev/null 2>&1; then
   say "installing the herdr-space-cos user service"
   mkdir -p "$HOME/.config/systemd/user"
-  cp "$REPO/systemd/herdr-space-cos.service" "$HOME/.config/systemd/user/"
+  cp "$REPO/systemd/herdr-space-cos.service" "$REPO/systemd/herdr-farm.service" "$HOME/.config/systemd/user/"
   systemctl --user daemon-reload
-  systemctl --user enable herdr-space-cos.service >/dev/null
-  systemctl --user restart herdr-space-cos.service
+  systemctl --user enable herdr-space-cos.service herdr-farm.service >/dev/null
+  systemctl --user restart herdr-space-cos.service herdr-farm.service
 else
   warn "no systemd user session; run '$AGENTS_HOME/bin/agentctl watch' yourself"
 fi
@@ -96,4 +96,5 @@ if [ "${1:-}" = "--renderers" ]; then
   install_renderer charmbracelet/glow v3.0.0 glow_3.0.0_Linux_x86_64.tar.gz glow
 fi
 
-say "done. Open a new herdr workspace: its first tab starts a chief of staff."
+say "done. Open a new herdr workspace: its first tab starts a lead farmer."
+say "watch the farm at http://127.0.0.1:8787"
