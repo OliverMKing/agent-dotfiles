@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Farm</title>
+<title>Your Farms</title>
 <style>
 :root {
   --sky-top: #8ecdf2; --sky-bottom: #d9f0fb;
@@ -55,6 +55,20 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 .quota-card .note { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
 @media (max-width: 600px) { .quota-card { grid-template-columns: 1fr; } }
 
+/* new farm dialog */
+dialog#farmdlg { border: 2px solid var(--line); border-radius: 16px; padding: 0; width: min(520px, calc(100vw - 32px));
+  background: var(--card); color: var(--ink); }
+dialog#farmdlg::backdrop { background: rgba(0,0,0,.35); }
+#farmform { display: grid; gap: 10px; padding: 18px; }
+#farmform h3 { margin: 0 0 4px; }
+#farmform label { display: grid; gap: 4px; font-size: 13px; font-weight: 700; }
+#farmform label.inline { display: flex; gap: 8px; align-items: center; font-weight: 400; }
+#farmform small { font-weight: 400; color: var(--muted); }
+#farmform input:not([type=checkbox]), #farmform textarea { font: inherit; font-weight: 400; font-size: 14px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink); }
+#farmform .row { display: flex; justify-content: flex-end; gap: 8px; }
+#farmform .err { color: var(--blocked); font-size: 13px; }
+
 /* needs-you board */
 .needs { background: #fff4e6; color: #2f2a22; border-bottom: 3px solid var(--accent); padding: 10px 14px; display: grid; gap: 8px; }
 .needs h3 { margin: 0; font-size: 14px; color: var(--accent); }
@@ -76,6 +90,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 .btn { font: inherit; font-size: 12px; font-weight: 700; border-radius: 999px; border: 2px solid var(--accent);
   background: #fff; color: var(--accent); padding: 4px 12px; cursor: pointer; white-space: nowrap; }
 .btn:hover { background: var(--accent); color: #fff; }
+.btn:disabled { opacity: .45; cursor: not-allowed; background: #fff; color: var(--accent); }
 .btn.quiet { border-color: var(--line); color: var(--muted); background: var(--card); }
 .allclear { background: var(--card); border: 2px solid var(--line); border-radius: 16px; padding: 10px 14px;
   font-size: 14px; color: var(--muted); }
@@ -181,13 +196,29 @@ pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, m
 <body>
 <header>
   <span class="sun" id="sun" aria-hidden="true">☀️</span>
-  <h1>The Farm</h1>
+  <h1>Your Farms</h1>
   <div class="chips" id="chips"></div>
+  <button class="btn" id="newfarm" type="button">+ New farm</button>
   <button class="btn quiet" id="notify" type="button">🔔 Notify me</button>
 </header>
 <div class="quota" id="quota"></div>
 <div class="updated" id="updated">Loading the farm…</div>
 <main id="farm"></main>
+
+<dialog id="farmdlg">
+  <form method="dialog" id="farmform">
+    <h3>🌾 Start a new farm</h3>
+    <label>Name<input id="f-label" required maxlength="60" placeholder="for example: Billing service"></label>
+    <label>Folder<input id="f-cwd" list="f-folders" placeholder="/path/to/repo" required></label>
+    <datalist id="f-folders"></datalist>
+    <label>What should this farm work on? <small>(optional, sent to its lead farmer)</small>
+      <textarea id="f-msg" rows="4" placeholder="for example: Fix the flaky checkout test and open a PR."></textarea></label>
+    <label class="inline"><input type="checkbox" id="f-focus"> Switch herdr to it</label>
+    <div class="err" id="f-err" hidden></div>
+    <div class="row"><button class="btn quiet" value="cancel" formnovalidate type="submit">Cancel</button>
+      <button class="btn" id="f-create" value="create" type="submit">Plant it</button></div>
+  </form>
+</dialog>
 
 <aside class="drawer" id="drawer" aria-live="polite">
   <header>
@@ -284,23 +315,23 @@ function render() {
   const farm = document.getElementById("farm");
   const spaces = state.spaces;
   const all = spaces.flatMap(s => [s.lead_farmer, ...s.farmers, ...s.farmers.flatMap(f => f.animals), ...s.loose].filter(Boolean));
-  const working = all.filter(a => a.status === "working").length;
+  const crew = all.filter(a => a.kind !== "farmhand");  // only farm agents, not sessions you started yourself
+  const working = crew.filter(a => a.status === "working").length;
   const blocked = all.filter(a => a.status === "blocked").length;
   const waiting = spaces.reduce((n, s) => n + (s.waiting_messages || 0), 0);
   const needCount = spaces.reduce((n, s) => n + (s.needs || []).length, 0);
+  const sleeping = crew.filter(a => a.status === "idle" || a.status === "done").length;
   document.getElementById("chips").innerHTML =
-    `<span class="chip"><b>${spaces.length}</b> fields</span>` +
-    `<span class="chip"><b>${spaces.reduce((n, s) => n + s.farmers.length, 0)}</b> farmers</span>` +
-    `<span class="chip"><b>${spaces.reduce((n, s) => n + s.farmers.reduce((m, f) => m + f.animals.length, 0) + s.loose.length, 0)}</b> animals</span>` +
-    `<span class="chip"><b>${working}</b> at work</span>` +
+    `<span class="chip" title="Agents in the middle of a turn"><b>${working}</b> 🏃 working</span>` +
+    `<span class="chip" title="Agents that are idle or finished their turn"><b>${sleeping}</b> 💤 sleeping</span>` +
     (needCount ? `<button class="chip alert" data-goto="needs" title="Go to what needs you"><b>${needCount}</b> need you</button>` : "") +
     (blocked ? `<button class="chip alert" data-goto="needs" title="Go to what needs you"><b>${blocked}</b> blocked on a dialog</button>` : "") +
     (waiting ? `<button class="chip" data-goto="mail" title="Go to who the messages are for"><b>${waiting}</b> messages waiting</button>` : "");
   const needs = spaces.flatMap(s => (s.needs || []).map(n => ({ n, s })))
     .sort((a, b) => a.n.priority.localeCompare(b.n.priority) || (a.n.since || 0) - (b.n.since || 0));
-  document.title = needs.length ? `(${needs.length}) The Farm` : "The Farm";
+  document.title = needs.length ? `(${needs.length}) Your Farms` : "Your Farms";
   notifyNew(spaces);
-  if (!spaces.length) { farm.innerHTML = `<div class="empty">No fields yet. Open a herdr space to plant one.</div>`; return; }
+  if (!spaces.length) { farm.innerHTML = `<div class="empty">No farms yet. Use “+ New farm” to start one.</div>`; return; }
   const top = needs.length
     ? `<section class="allneeds" id="needs" aria-label="Needs you"><h2>🔔 Needs you (${needs.length})</h2>
          ${needs.map(x => needRow(x.n, x.s, true)).join("")}
@@ -326,7 +357,7 @@ function render() {
             </div>`).join("")}
           ${s.loose.length ? `<div class="plot"><div class="sign">Roaming<small>not tied to a farmer</small></div>
               <div class="crew">${s.loose.map(a => who(a, a.kind !== "farmhand")).join("")}</div></div>` : ""}
-          ${!s.farmers.length && !s.loose.length ? `<div class="fallow">This field is fallow. No farmers yet.</div>` : ""}
+          ${!s.farmers.length && !s.loose.length ? `<div class="fallow">This farm is fallow. No farmers yet.</div>` : ""}
         </div>
       </div>
     </section>`).join("");
@@ -510,7 +541,8 @@ document.addEventListener("click", e => {
 });
 document.getElementById("notify").addEventListener("click", async () => {
   if (!("Notification" in window)) { alert("This browser does not support notifications."); return; }
-  if (localStorageGet("farm-notify") === "on") { localStorageSet("farm-notify", "off"); paintNotifyButton(); return; }
+  if (localStorageGet("farm-notify") === "on") { localStorageSet("farm-notify", "off"); paintNotifyButton();
+ return; }
   const p = await Notification.requestPermission();
   localStorageSet("farm-notify", p === "granted" ? "on" : "off"); paintNotifyButton();
 });
@@ -538,6 +570,37 @@ async function refreshQuota() {
   } catch (e) { el.innerHTML = ""; }
 }
 refreshQuota(); setInterval(refreshQuota, 30000);
+document.getElementById("newfarm").addEventListener("click", async () => {
+  const dlg = document.getElementById("farmdlg");
+  document.getElementById("f-err").hidden = true;
+  try {
+    const folders = await (await fetch("/api/folders", { cache: "no-store" })).json();
+    document.getElementById("f-folders").innerHTML = folders.map(f => `<option value="${esc(f)}">`).join("");
+  } catch (e) {}
+  dlg.showModal(); document.getElementById("f-label").focus(); checkName();
+});
+document.getElementById("farmform").addEventListener("submit", async e => {
+  if (e.submitter && e.submitter.value === "cancel") return;   // let the dialog close
+  e.preventDefault();
+  const btn = document.getElementById("f-create"), err = document.getElementById("f-err");
+  if (!document.getElementById("f-label").value.trim()) { err.textContent = "Give the farm a name."; err.hidden = false; return; }
+  btn.disabled = true; btn.textContent = "Planting…"; err.hidden = true;
+  const r = await fetch("/api/farms", { method: "POST", headers: { "X-Farm-Token": TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ label: document.getElementById("f-label").value, cwd: document.getElementById("f-cwd").value,
+      first_message: document.getElementById("f-msg").value, focus: document.getElementById("f-focus").checked }) });
+  let d = {}; try { d = await r.json(); } catch (x) {}
+  btn.disabled = false; btn.textContent = "Plant it";
+  if (!r.ok || !d.ok) { err.textContent = d.reason || `failed (${r.status})`; err.hidden = false; return; }
+  document.getElementById("farmform").reset(); document.getElementById("farmdlg").close();
+  refresh();
+});
+function checkName() {
+  const ok = document.getElementById("f-label").value.trim().length > 0;
+  document.getElementById("f-create").disabled = !ok;
+  document.getElementById("f-create").title = ok ? "" : "Give the farm a name first";
+}
+document.getElementById("f-label").addEventListener("input", checkName);
+
 sky(); setInterval(sky, 60000);
 refresh(); setInterval(refresh, 3000);
 </script>

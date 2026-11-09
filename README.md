@@ -1,6 +1,6 @@
 # agent-dotfiles
 
-This repository holds a farm-flavored multi-agent setup for [herdr](https://herdr.dev). Each herdr space (workspace) is a field. Each field gets its own lead farmer, which is a chief of staff (CoS) agent. The lead farmer plans the work in its field, and it starts and stops farmers (lead agents) for that work. Farmers give bounded tasks to animals (single-use child agents).
+This repository holds a farm-flavored multi-agent setup for [herdr](https://herdr.dev). Each herdr space (workspace) is a farm. Each farm gets its own lead farmer, which is a chief of staff (CoS) agent. The lead farmer plans the work in its farm, and it starts and stops farmers (lead agents) for that work. Farmers give bounded tasks to animals (single-use child agents).
 
 | Farm name | Agent role | `agentctl` role | Animal on the farm page |
 |---|---|---|---|
@@ -39,10 +39,10 @@ The install script does these steps:
 
 The `herdr-farm` service serves a live view at http://127.0.0.1:8787. It listens only on your machine, because it shows agent screens.
 
-- Each space is a field with a farmhouse for its lead farmer and a fenced plot for each farmer. The animals of a farmer stand in its plot.
+- Each space is a farm with a farmhouse for its lead farmer and a fenced plot for each farmer. The animals of a farmer stand in its plot.
 - An agent bobs or trots when it works, shows 💤 when it is idle, and shows ❗ when it is blocked on a dialog.
 - The bar under an agent is a hay bale that shows how full its context is.
-- A "Needs you" panel at the top of the page lists everything that needs you, in every field, most urgent first:
+- A "Needs you" panel at the top of the page lists everything that needs you, in every farm, most urgent first:
   - open decisions;
   - agents that wait on a dialog (for example folder trust or a permission prompt);
   - an unsent draft of yours that holds messages back;
@@ -52,6 +52,8 @@ The `herdr-farm` service serves a live view at http://127.0.0.1:8787. It listens
 - The page and the agent messages name a location as workspace › tab › pane, for example "GlobalGatewayController" › tab "fix Private Link approval". They do not use herdr IDs such as `w1:pG`.
 - Click an agent to see its details. A "Now:" line shows what it does at the moment, for example "Running: go test ./..." or "Editing: reconciler.go", from its latest tool call or note. A farmer or an animal also has a "Messages" view, with labeled messages: its task, messages from its parent, your messages, reports from its animals, its own reports, and its replies. Tool output is left out. The raw terminal is still available, collapsed.
 - A quota bar at the top shows the Copilot premium credits used this month, from the `/usage` endpoint of the copilot-api proxy. A marker shows how much of the month has passed. The bar turns amber when the use is ahead of that pace or above 80%, and red when the quota is used up. The farm sends only the quota numbers to the page. Set `AGENTCTL_PROXY_URL` if the proxy is not on `http://localhost:4141`.
+
+To start a new farm from the browser, click "+ New farm". Give it a name and a folder. The folder field suggests the folders of your farms and the folders that Claude or Codex trust. You can also write what the farm should work on. The farm server creates the herdr workspace, and the watcher starts its lead farmer. The lead farmer gets your text as its first message after its greeting. The button works only from the farm page, because it needs the page token.
 
 ## Decisions
 

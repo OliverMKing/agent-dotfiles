@@ -1144,6 +1144,62 @@ def copilot_quota():
             "overage_permitted": q.get("overage_permitted"), "overage_count": q.get("overage_count", 0)}
 
 
+def folder_suggestions():
+    """Folders worth offering for a new farm: existing farms' folders and folders Claude/Codex trust."""
+    out = []
+    for wid in os.listdir(SPACES) if os.path.isdir(SPACES) else []:
+        try:
+            c = json.load(open(os.path.join(SPACES, wid, "space.json"))).get("cwd")
+            if c:
+                out.append(c)
+        except (OSError, ValueError):
+            pass
+    try:
+        out += [k for k, v in json.load(open(os.path.join(HOME, ".claude.json"))).get("projects", {}).items()
+                if v.get("hasTrustDialogAccepted")]
+    except (OSError, ValueError):
+        pass
+    try:
+        out += re.findall(r'^\[projects\."([^"]+)"\]', open(os.path.join(HOME, ".codex", "config.toml")).read(), re.M)
+    except OSError:
+        pass
+    return sorted({p for p in out if os.path.isdir(p)})
+
+
+def create_farm(label, cwd, first_message=None, focus=False):
+    """Create a herdr workspace (a farm). The watcher starts its lead farmer; an optional first message
+    is delivered once that lead farmer has finished its greeting."""
+    label = " ".join((label or "").split())[:60]
+    cwd = os.path.realpath(os.path.expanduser((cwd or "").strip() or HOME))
+    if not label:
+        return {"ok": False, "reason": "give the farm a name"}
+    if not os.path.isdir(cwd):
+        return {"ok": False, "reason": f"no such folder: {cwd}"}
+    args = ["workspace", "create", "--label", label, "--cwd", cwd, "--focus" if focus else "--no-focus"]
+    r = herdr(*args, check=False)
+    ws = (r.get("workspace") or {})
+    wid = ws.get("workspace_id")
+    if not wid:
+        return {"ok": False, "reason": f"herdr could not create it: {r.get('error') or r}"}
+    if first_message and first_message.strip():
+        def deliver_first():
+            name = f"{COS_PREFIX}{wid.lower()}"
+            for _ in range(90):  # wait for the watcher to start the lead farmer
+                if agent_by_name(name):
+                    break
+                time.sleep(2)
+            time.sleep(5)
+            try:
+                herdr("agent", "wait", name, "--until", "idle", "--until", "done", "--timeout", "300000", check=False)
+                if submit(name, first_message.strip()[:8000]):
+                    with open(os.path.join(INBOX, f"{name}.farm.jsonl"), "a") as f:
+                        f.write(json.dumps({"ts": time.time(), "text": first_message.strip()[:8000]}) + "\n")
+            except Exception as err:  # noqa: BLE001
+                log(f"farm {wid}: first message failed: {err}")
+        threading.Thread(target=deliver_first, daemon=True).start()
+    return {"ok": True, "workspace_id": wid, "label": label, "cwd": cwd}
+
+
 def cmd_farm(a):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import unquote
@@ -1175,6 +1231,8 @@ def cmd_farm(a):
                     st["page_version"] = str(int(os.path.getmtime(page)))  # open pages reload on change
                     body = json.dumps(st).encode()
                     self._send(200, body, "application/json")
+                elif self.path == "/api/folders":
+                    self._send(200, json.dumps(folder_suggestions()).encode(), "application/json")
                 elif self.path == "/api/quota":
                     with lock:
                         if time.time() - cache["qt"] > 60:
@@ -1192,6 +1250,17 @@ def cmd_farm(a):
         def do_POST(self):
             if self.headers.get("X-Farm-Token") != token:
                 self._send(403, b"forbidden", "text/plain")
+                return
+            if self.path == "/api/farms":
+                n = int(self.headers.get("Content-Length") or 0)
+                try:
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                except ValueError:
+                    body = {}
+                res = create_farm(body.get("label"), body.get("cwd"), body.get("first_message"), bool(body.get("focus")))
+                with _FARM_LOCK:
+                    _FARM_CACHE["t"] = 0  # show the new farm right away
+                self._send(200 if res["ok"] else 400, json.dumps(res).encode(), "application/json")
                 return
             if self.path.startswith("/api/say/"):
                 target = unquote(self.path[len("/api/say/"):])
