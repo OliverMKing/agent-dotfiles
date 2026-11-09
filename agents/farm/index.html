@@ -154,6 +154,13 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 :root[data-sky="night"] .msg.you { background: #2b5a33; color: #e9f7ec; }
 :root[data-sky="night"] .msg.them { background: rgba(255,255,255,.05); }
 .msg.pending { opacity: .65; }
+.msg.side { justify-self: start; background: transparent; border: 1px dashed var(--line); color: var(--muted); font-size: 12.5px; }
+.msg.report { border-left: 3px solid var(--accent); }
+.msg details summary { cursor: pointer; }
+.now { display: flex; gap: 8px; align-items: baseline; font-size: 13px; background: rgba(0,0,0,.04); border: 1px solid var(--line);
+  border-radius: 10px; padding: 8px 10px; }
+:root[data-sky="night"] .now { background: rgba(255,255,255,.04); }
+.now b { white-space: nowrap; } .now span { word-break: break-word; } .now small { margin-left: auto; color: var(--muted); white-space: nowrap; }
 .msg.typing { font-style: italic; color: var(--muted); }
 .msg.typing .dots::after { content: "…"; animation: dots 1.2s steps(3, end) infinite; display: inline-block; width: 1.2em; overflow: hidden; vertical-align: bottom; }
 @keyframes dots { 0% { width: 0; } 100% { width: 1.2em; } }
@@ -365,12 +372,14 @@ async function loadDetail() {
   const sel = window.getSelection();
   if (sel && sel.toString() && content.contains(sel.anchorNode)) return;
   const sig = JSON.stringify([a.status, a.last_report, a.context_tokens, a.compactions, a.screen, a.last_report_text,
-                              (a.conversation || []).length, a.unread_reports, (pendingSent[a.name] || []).length]);
+                              (a.conversation || []).length, a.unread_reports, (pendingSent[a.name] || []).length,
+                              (a.messages || []).length, a.activity && a.activity.text]);
   const oldChat = content.querySelector(".chat");
   const chatAtBottom = !oldChat || oldChat.scrollHeight - oldChat.scrollTop - oldChat.clientHeight < 8;
   const chatTop = oldChat ? oldChat.scrollTop : 0;
   if (content.dataset.name === a.name && content.dataset.sig === sig) return;
   const oldPre = content.querySelector("pre.screen");
+  const screenOpen = !!(content.querySelector("details.screenbox") || {}).open;
   const sameAgent = content.dataset.name === a.name;
   const preTop = oldPre ? oldPre.scrollTop : 0;
   const atBottom = !oldPre || oldPre.scrollHeight - oldPre.scrollTop - oldPre.clientHeight < 8;
@@ -389,12 +398,14 @@ async function loadDetail() {
       <div>Where</div><div>${esc(a.where || a.tab_label || "?")} <button class="btn" data-focus="${esc(a.name)}">Show me</button></div>
       <div>Folder</div><div>${esc(a.cwd || "")}</div>
     </div>
+    ${a.activity ? `<div class="now"><b>Now:</b><span>${esc(a.activity.text)}</span>${a.activity.ts ? `<small>${ago(a.activity.ts)}</small>` : ""}</div>` : ""}
     ${a.kind === "leadfarmer" ? `<div><div class="label">Your conversation${a.unread_reports ? ` · ${a.unread_reports} unread report(s) from farmers` : ""}</div>
         <div class="box chat">${chatHtml(a)}</div></div>` : ""}
-    ${a.last_report_text && a.kind !== "leadfarmer" ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
-    <${a.kind === "leadfarmer" ? "details class=\"screenbox\"" : "div"}>${a.kind === "leadfarmer" ? "<summary class=\"label\">Live screen (everything, including reports)</summary>" : "<div class=\"label\">Live screen</div>"}
-      <div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></${a.kind === "leadfarmer" ? "details" : "div"}>`;
+    ${a.kind !== "leadfarmer" ? `<div><div class="label">Messages</div><div class="box chat">${messagesHtml(a)}</div></div>` : ""}
+    <details class="screenbox"><summary class="label">Live screen (raw terminal)</summary>
+      <div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></details>`;
   const pre = content.querySelector("pre.screen");
+  if (sameAgent && screenOpen) content.querySelector("details.screenbox").open = true;
   const chat = content.querySelector(".chat");
   if (chat) chat.scrollTop = sameAgent && !chatAtBottom ? chatTop : chat.scrollHeight;
   if (sameAgent) {
@@ -417,7 +428,31 @@ function chatHtml(a) {
   if (lastFromYou) bubbles.push(`<div class="msg them typing"><small>lead farmer</small>${a.status === "working" ? "thinking" : "reading your message"}<span class="dots"></span></div>`);
   return bubbles.length ? bubbles.join("") : `<span class="label">No messages yet. Say hello below.</span>`;
 }
+const KIND_LABEL = { you: "you", parent: null, task: "task", watch: "watchdog", children: "from its animals",
+  reply: null, report: "report" };
+function messagesHtml(a) {
+  const conv = a.messages || [];
+  const seen = new Set(conv.filter(m => m.kind === "you").map(m => m.text.trim()));
+  const pend = (pendingSent[a.name] || []).filter(p => !seen.has(p.text.trim()) && Date.now() - p.ts < 120000);
+  pendingSent[a.name] = pend;
+  const when = m => m.ts ? " · " + new Date(m.ts * 1000).toLocaleTimeString() : "";
+  const bubbles = conv.map(m => {
+    const mine = m.kind === "reply" || m.kind === "report";
+    const cls = m.kind === "you" ? "you" : mine ? `them ${m.kind === "report" ? "report" : ""}` : m.kind === "parent" ? "them" : "side";
+    const who = m.kind === "you" ? "you" : m.kind === "reply" ? `${a.title || a.name} replied`
+      : m.kind === "report" ? `${a.title || a.name} → report to ${m.to || "parent"}` : m.kind === "task" ? `task from ${m.from}`
+      : m.kind === "parent" ? m.from : KIND_LABEL[m.kind] || m.kind;
+    const body = m.kind === "task" || m.text.length > 1200
+      ? `<details><summary>${esc(m.text.slice(0, 160))}…</summary>${esc(m.text)}</details>` : esc(m.text);
+    return `<div class="msg ${cls}"><small>${esc(who)}${when(m)}</small>${body}</div>`;
+  }).concat(pend.map(p => `<div class="msg you pending"><small>you · sending</small>${esc(p.text)}</div>`));
+  const last = conv[conv.length - 1];
+  if (pend.length || (last && (last.kind === "you" || last.kind === "parent" || last.kind === "task") && a.status === "working"))
+    bubbles.push(`<div class="msg them typing"><small>${esc(a.title || a.name)}</small>working<span class="dots"></span></div>`);
+  return bubbles.length ? bubbles.join("") : `<span class="label">No messages yet.</span>`;
+}
 function awaitingReply(a) {
+  if (a.kind !== "leadfarmer") { const m = a.messages || []; return (pendingSent[a.name] || []).length > 0 || (m.length && m[m.length - 1].kind === "you"); }
   const conv = a.conversation || [];
   return (pendingSent[a.name] || []).length > 0 || (conv.length && conv[conv.length - 1].from === "you");
 }

@@ -857,6 +857,140 @@ def _human_text(t):
     return t[:cut].strip() or None
 
 
+def _ts(iso):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _describe_tool(name, inp):
+    base = lambda pth: os.path.basename(str(pth or "").rstrip("/")) or str(pth)  # noqa: E731
+    if isinstance(inp, str):  # codex: tools.exec_command({cmd:"..."}) / tools.apply_patch("*** Update File: x")
+        m = re.search(r'cmd:\s*"((?:[^"\\]|\\.)*)"', inp)
+        if m:
+            return "Running: " + m.group(1).encode().decode("unicode_escape", "ignore").splitlines()[0][:150]
+        m = re.search(r"\*\*\* (?:Update|Add|Delete) File: ([^\\\n]+)", inp)
+        if m:
+            return "Editing: " + base(m.group(1).strip())
+        return f"Using {name}"
+    inp = inp or {}
+    if name == "Bash":
+        return "Running: " + str(inp.get("command", "")).splitlines()[0][:150] if inp.get("command") else "Running a command"
+    if name in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        return "Editing: " + base(inp.get("file_path") or inp.get("notebook_path"))
+    if name == "Read":
+        return "Reading: " + base(inp.get("file_path"))
+    if name in ("Grep", "Glob"):
+        return f"Searching: {inp.get('pattern', '')}"[:150]
+    if name in ("WebFetch", "WebSearch"):
+        return f"Web: {inp.get('url') or inp.get('query', '')}"[:150]
+    if name in ("Agent", "Task"):
+        return f"Delegating: {inp.get('description', '')}"[:150]
+    return f"Using {name}"
+
+
+def activity(vendor, session_id):
+    """What the agent is doing now: its latest tool call or note, from its transcript."""
+    import glob
+    if not session_id:
+        return None
+    pat = (os.path.join(HOME, ".claude", "projects", "*", f"{session_id}.jsonl") if vendor == "claude" else
+           os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"*{session_id}*.jsonl"))
+    files = glob.glob(pat)
+    if not files:
+        return None
+    for line in reversed(_tail_lines(files[0], 1_500_000)):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if vendor == "claude" and d.get("type") == "assistant":
+            for x in reversed(d["message"]["content"]):
+                if x.get("type") == "tool_use":
+                    return {"text": _describe_tool(x.get("name"), x.get("input")), "ts": _ts(d.get("timestamp"))}
+                if x.get("type") == "text" and x.get("text", "").strip():
+                    return {"text": x["text"].strip().splitlines()[0][:200], "ts": _ts(d.get("timestamp"))}
+        if vendor != "claude" and d.get("type") == "response_item":
+            p = d.get("payload") or {}
+            if p.get("type") in ("custom_tool_call", "function_call"):
+                return {"text": _describe_tool(p.get("name"), p.get("input") or p.get("arguments")),
+                        "ts": _ts(d.get("timestamp"))}
+            if p.get("type") == "message" and p.get("role") == "assistant":
+                t = "\n".join(c.get("text", "") for c in p.get("content", []) if isinstance(c, dict)).strip()
+                if t:
+                    return {"text": t.splitlines()[0][:200], "ts": _ts(d.get("timestamp"))}
+    return None
+
+
+def message_history(vendor, session_id, name, parent, limit=60):
+    """Everything said to and by a farmer or animal, labeled: task, parent, you, watchdog, children,
+    its reports, and its replies. Tool calls are left out."""
+    import glob
+    out = []
+    farm_sent = set()
+    try:
+        farm_sent = {json.loads(l)["text"].strip() for l in open(os.path.join(INBOX, f"{name}.farm.jsonl"))}
+    except (OSError, ValueError):
+        pass
+    if session_id:
+        pat = (os.path.join(HOME, ".claude", "projects", "*", f"{session_id}.jsonl") if vendor == "claude" else
+               os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"*{session_id}*.jsonl"))
+        files = glob.glob(pat)
+        for line in _tail_lines(files[0], 8_000_000) if files else []:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            ts = _ts(d.get("timestamp"))
+            if vendor == "claude":
+                if d.get("type") == "user" and not d.get("isMeta"):
+                    c = d["message"]["content"]
+                    texts = [c] if isinstance(c, str) else [x.get("text", "") for x in c if x.get("type") == "text"]
+                    if texts and texts[0].strip():
+                        out.append(_classify_in(texts[0], name, parent, farm_sent, ts))
+                elif d.get("type") == "assistant" and d["message"].get("stop_reason") == "end_turn":
+                    t = "\n".join(x.get("text", "") for x in d["message"]["content"] if x.get("type") == "text").strip()
+                    if t:
+                        out.append({"kind": "reply", "from": name, "text": t, "ts": ts})
+            else:
+                p = d.get("payload") or {}
+                if d.get("type") != "response_item" or p.get("type") != "message":
+                    continue
+                t = "\n".join(c.get("text", "") for c in p.get("content", []) if isinstance(c, dict)).strip()
+                if p.get("role") == "user" and t and not t.startswith("<environment_context"):
+                    out.append(_classify_in(t, name, parent, farm_sent, ts))
+                elif p.get("role") == "assistant" and p.get("phase") == "final_answer" and t:
+                    out.append({"kind": "reply", "from": name, "text": t, "ts": ts})
+    try:
+        for l in open(os.path.join(INBOX, f"{name}.sent.jsonl")):
+            m = json.loads(l)
+            out.append({"kind": "report", "from": name, "to": m.get("to"), "text": m["text"], "ts": m["ts"]})
+    except (OSError, ValueError):
+        pass
+    out = [m for m in out if m]
+    out.sort(key=lambda m: m.get("ts") or 0)
+    return out[-limit:]
+
+
+def _classify_in(raw, name, parent, farm_sent, ts):
+    t = re.sub(r"^\s*<pasted_content[^>]*>\s*|\s*</pasted_content[^>]*>\s*$", "", raw).strip()
+    if t.strip() in farm_sent:
+        kind, who = "you", "you"
+    elif t.startswith(f"You are {name} ("):
+        kind, who = "task", parent or "parent"
+    elif t.startswith("[watch]"):
+        kind, who = "watch", "watchdog"
+    elif t.startswith(("[from ", "[inbox]", "\U0001F4EC")):
+        kind, who = "children", "its animals"
+    elif t.startswith(("/compact", "/clear", "/new", "Your context was reset")):
+        return None
+    else:
+        kind, who = "parent", parent or "parent"
+    return {"kind": kind, "from": who, "text": t, "ts": ts}
+
+
 def _reply_text(t):
     t = re.sub(r"\s*Nothing needs you\.?\s*$", "", (t or "").strip())
     return t.strip()
@@ -940,6 +1074,11 @@ def farm_agent_detail(name):
                 live = agent_by_name(name)
                 if live:
                     extra["status"] = live["agent_status"]
+                e = next((x for x in reg_all() if x.get("name") == name), {})
+                vendor = (e.get("model") or {}).get("vendor") or a.get("vendor")
+                extra["activity"] = activity(vendor, e.get("session_id"))
+                if a["kind"] != "leadfarmer":
+                    extra["messages"] = message_history(vendor, e.get("session_id"), name, e.get("parent"))
                 if a["kind"] == "leadfarmer":
                     e = next((x for x in reg_all() if x.get("name") == name), {})
                     extra["conversation"] = conversation((e.get("model") or {}).get("vendor") or a.get("vendor"),
@@ -1053,6 +1192,9 @@ def cmd_farm(a):
                     self._send(409, json.dumps({"ok": False, "reason": reason}).encode(), "application/json")
                     return
                 ok = submit(target, text[:8000])
+                if ok:
+                    with open(os.path.join(INBOX, f"{target}.farm.jsonl"), "a") as f:
+                        f.write(json.dumps({"ts": time.time(), "text": text[:8000]}) + "\n")
                 self._send(200 if ok else 500, json.dumps({"ok": ok, "reason": None if ok else
                                                            "the text did not submit"}).encode(), "application/json")
                 return
@@ -1175,6 +1317,7 @@ def enqueue(recipient, text, sender, final=False, space=None):
     (outbox.jsonl); the watcher moves it into the inbox."""
     rec = {"ts": time.time(), "from": sender, "to": recipient, "text": text, "final": final, "space": space}
     line = json.dumps(rec) + "\n"
+    log_sent(sender, rec)
     try:
         os.makedirs(INBOX, exist_ok=True)
         with open(os.path.join(INBOX, f"{recipient}.jsonl"), "a") as f:
@@ -1221,6 +1364,18 @@ def cmd_inbox(a):
             pass
 
 
+def log_sent(sender, rec):
+    """Remember what an agent sent (for its Messages view on the farm page). Best effort."""
+    if not sender or sender in ("watchdog", "?"):
+        return
+    try:
+        os.makedirs(INBOX, exist_ok=True)
+        with open(os.path.join(INBOX, f"{sender}.sent.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
 def drain_outboxes():
     """Move messages that sandboxed agents left in their output dirs into the inbox."""
     if not os.path.isdir(SPACES):
@@ -1242,6 +1397,7 @@ def drain_outboxes():
                         m = json.loads(l)
                         with open(os.path.join(INBOX, f"{m['to']}.jsonl"), "a") as f:
                             f.write(json.dumps(m) + "\n")
+                        log_sent(m.get("from"), m)
                         if m.get("space") and m.get("from"):
                             try:
                                 reg_update(m["space"], m["from"], last_report=m["ts"],

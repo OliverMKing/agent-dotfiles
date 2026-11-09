@@ -50,7 +50,7 @@ The `herdr-farm` service serves a live view at http://127.0.0.1:8787. It listens
 - The counters at the top are buttons. "Need you" jumps to the "Needs you" panel. "Messages waiting" jumps to the agent that the messages are for. A 📬 badge marks each agent with waiting messages.
 - Each item has a "Show me" button that switches herdr to the right pane. The browser tab title shows the count, and "Notify me" turns on desktop notifications for new items.
 - The page and the agent messages name a location as workspace › tab › pane, for example "GlobalGatewayController" › tab "fix Private Link approval". They do not use herdr IDs such as `w1:pG`.
-- Click an agent to see its task, last report, model, context and live screen.
+- Click an agent to see its details. A "Now:" line shows what it does at the moment, for example "Running: go test ./..." or "Editing: reconciler.go", from its latest tool call or note. A farmer or an animal also has a "Messages" view, with labeled messages: its task, messages from its parent, your messages, reports from its animals, its own reports, and its replies. Tool output is left out. The raw terminal is still available, collapsed.
 - A quota bar at the top shows the Copilot premium credits used this month, from the `/usage` endpoint of the copilot-api proxy. A marker shows how much of the month has passed. The bar turns amber when the use is ahead of that pace or above 80%, and red when the quota is used up. The farm sends only the quota numbers to the page. Set `AGENTCTL_PROXY_URL` if the proxy is not on `http://localhost:4141`.
 
 ## Decisions
