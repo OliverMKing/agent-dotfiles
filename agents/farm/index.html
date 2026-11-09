@@ -326,7 +326,12 @@ function goTo(target) {
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
 }
+function closeDetail() {
+  openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
+}
 document.addEventListener("click", e => {
+  // a click outside the drawer closes it (clicking another farmer or animal switches to them)
+  if (openName && !e.target.closest("#drawer") && !e.target.closest(".who")) closeDetail();
   const g = e.target.closest("[data-goto]"); if (g) { goTo(g.dataset.goto); return; }
   const f = e.target.closest("[data-focus]"); if (f) { e.stopPropagation(); focusAgent(f.dataset.focus); return; }
   const b = e.target.closest(".who"); if (b) openDetail(b.dataset.name);
@@ -338,9 +343,7 @@ document.getElementById("notify").addEventListener("click", async () => {
   localStorageSet("farm-notify", p === "granted" ? "on" : "off"); paintNotifyButton();
 });
 paintNotifyButton();
-document.getElementById("d-close").addEventListener("click", () => {
-  openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
-});
+document.getElementById("d-close").addEventListener("click", closeDetail);
 document.addEventListener("keydown", e => { if (e.key === "Escape") document.getElementById("d-close").click(); });
 sky(); setInterval(sky, 60000);
 refresh(); setInterval(refresh, 3000);
