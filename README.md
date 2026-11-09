@@ -42,7 +42,14 @@ The `herdr-farm` service serves a live view at http://127.0.0.1:8787. It listens
 - Each space is a field with a farmhouse for its lead farmer and a fenced plot for each farmer. The animals of a farmer stand in its plot.
 - An agent bobs or trots when it works, shows 💤 when it is idle, and shows ❗ when it is blocked on a dialog.
 - The bar under an agent is a hay bale that shows how full its context is.
-- A "Needs you" board at the top of a field lists the open decisions of that space.
+- A "Needs you" panel at the top of the page lists everything that needs you, in every field, most urgent first:
+  - open decisions;
+  - agents that wait on a dialog (for example folder trust or a permission prompt);
+  - an unsent draft of yours that holds messages back;
+  - a lead farmer that stopped.
+- The counters at the top are buttons. "Need you" jumps to the "Needs you" panel. "Messages waiting" jumps to the agent that the messages are for. A 📬 badge marks each agent with waiting messages.
+- Each item has a "Show me" button that switches herdr to the right pane. The browser tab title shows the count, and "Notify me" turns on desktop notifications for new items.
+- The page and the agent messages name a location as workspace › tab › pane, for example "GlobalGatewayController" › tab "fix Private Link approval". They do not use herdr IDs such as `w1:pG`.
 - Click an agent to see its task, last report, model, context and live screen.
 
 ## Decisions

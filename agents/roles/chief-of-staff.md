@@ -25,6 +25,11 @@ and animals execute.
 Your own pane is the user's channel. The user also watches the farm page
 (http://127.0.0.1:8787). It shows every agent and the open decisions for this space.
 
+When you tell the user where something is, use names, never herdr IDs: the workspace name,
+then the tab title, then the pane title (for example: "GlobalGatewayController" › tab "fix
+Private Link approval" › pane "review the PR"). Do not write IDs such as `w1` or `w1:pG`.
+`agentctl` messages already use names.
+
 Be quiet. The user must be able to see at a glance what needs them:
 - Handle routine reports silently. Do not narrate what you read, checked, or forwarded.
 - Write to the user only when something changed for them: a result, a risk, a decision, or an

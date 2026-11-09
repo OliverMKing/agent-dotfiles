@@ -32,6 +32,13 @@ h1 { margin: 0; font-size: 28px; letter-spacing: .5px; text-shadow: 0 1px 0 rgba
   font-size: 13px; color: var(--muted); }
 .chip b { color: var(--ink); }
 .chip.alert { border-color: var(--blocked); color: var(--blocked); }
+button.chip { font: inherit; font-size: 13px; cursor: pointer; }
+button.chip:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.chip:hover b { color: #fff; }
+.flash { animation: flash 1.6s ease-out 1; border-radius: 12px; }
+@keyframes flash { 0%, 40% { box-shadow: 0 0 0 6px #ffd43b; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.who .mail { position: absolute; top: -6px; left: -2px; font-size: 13px; background: #fff; border-radius: 8px;
+  padding: 0 4px; color: #2f2a22; font-weight: 800; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
 main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid; gap: 22px; }
 .empty { background: var(--card); border-radius: 16px; padding: 32px; text-align: center; color: var(--muted); }
 
@@ -42,6 +49,23 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 .ask .id { font-weight: 800; color: var(--accent); }
 .ask .meta { grid-column: 2; color: #6c6355; font-size: 12px; }
 .ask .p1 { color: var(--blocked); }
+
+.allneeds { background: #fff4e6; color: #2f2a22; border: 3px solid var(--accent); border-radius: 16px; padding: 12px 14px;
+  display: grid; gap: 8px; box-shadow: 0 4px 0 rgba(0,0,0,.08); }
+.allneeds h2 { margin: 0 0 2px; font-size: 18px; color: var(--accent); }
+.need { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 10px; align-items: start; font-size: 13.5px;
+  padding: 8px 0; border-top: 1px dashed #f0c9a5; }
+.need:first-of-type { border-top: 0; }
+.need .tag { font-weight: 800; color: var(--accent); white-space: nowrap; }
+.need .tag.p1 { color: var(--blocked); }
+.need .meta { grid-column: 2; color: #6c6355; font-size: 12px; white-space: pre-wrap; }
+.need .go { grid-row: 1 / span 2; grid-column: 3; }
+.btn { font: inherit; font-size: 12px; font-weight: 700; border-radius: 999px; border: 2px solid var(--accent);
+  background: #fff; color: var(--accent); padding: 4px 12px; cursor: pointer; white-space: nowrap; }
+.btn:hover { background: var(--accent); color: #fff; }
+.btn.quiet { border-color: var(--line); color: var(--muted); background: var(--card); }
+.allclear { background: var(--card); border: 2px solid var(--line); border-radius: 16px; padding: 10px 14px;
+  font-size: 14px; color: var(--muted); }
 
 /* a space = a field */
 .field { background: var(--grass); border-radius: 20px; overflow: hidden; border: 3px solid var(--grass-dark);
@@ -121,6 +145,7 @@ pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, m
   <span class="sun" id="sun" aria-hidden="true">☀️</span>
   <h1>The Farm</h1>
   <div class="chips" id="chips"></div>
+  <button class="btn quiet" id="notify" type="button">🔔 Notify me</button>
 </header>
 <div class="updated" id="updated">Loading the farm…</div>
 <main id="farm"></main>
@@ -149,6 +174,38 @@ function kindLabel(a) {
 }
 const BUBBLE = { working: "", idle: "💤", done: "💤", blocked: "❗", unknown: "❔" };
 let state = null, openName = null, detailTimer = null;
+const TOKEN = "__FARM_TOKEN__";
+const KIND_TAG = { decision: "", dialog: "Dialog", draft: "Draft", down: "Down" };
+let seenNeeds = null;
+function needKey(n, s) { return `${s.id}|${n.kind}|${n.id}`; }
+function needRow(n, s, showField) {
+  const tag = n.kind === "decision" ? `${n.id} ${n.priority}` : `${KIND_TAG[n.kind]} ${n.priority}`;
+  const where = showField ? `${esc(s.label)} · ` : "";
+  return `<div class="need"><span class="tag ${n.priority === "P1" ? "p1" : ""}">${esc(tag)}</span>
+    <span>${esc(n.text)}</span>
+    ${n.focus ? `<span class="go"><button class="btn" data-focus="${esc(n.focus)}">Show me</button></span>` : `<span></span>`}
+    <span class="meta">${where}from ${esc(n.from)}${n.since ? " · " + ago(n.since) : ""}${n.detail ? "\n" + esc(n.detail) : ""}</span></div>`;
+}
+async function focusAgent(name) {
+  const r = await fetch(`/api/focus/${encodeURIComponent(name)}`, { method: "POST", headers: { "X-Farm-Token": TOKEN } });
+  if (!r.ok) alert(`Could not switch herdr to ${name}.`);
+}
+function notifyNew(spaces) {
+  const all = spaces.flatMap(s => (s.needs || []).map(n => [needKey(n, s), n, s]));
+  const keys = new Set(all.map(x => x[0]));
+  if (seenNeeds && localStorageGet("farm-notify") === "on" && "Notification" in window && Notification.permission === "granted") {
+    for (const [k, n, s] of all) if (!seenNeeds.has(k)) new Notification(`🌾 ${s.label}: needs you`, { body: n.text, tag: k });
+  }
+  seenNeeds = keys;
+}
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function paintNotifyButton() {
+  const on = localStorageGet("farm-notify") === "on" && "Notification" in window && Notification.permission === "granted";
+  const b = document.getElementById("notify");
+  b.textContent = on ? "🔔 Notifications on" : "🔕 Notify me";
+  b.classList.toggle("quiet", !on);
+}
 
 function sky() {
   const h = new Date().getHours();
@@ -172,6 +229,7 @@ function who(a, small) {
   return `<button class="who ${small ? "small" : ""} ${st}" data-name="${esc(a.name)}"
             title="${esc(kindLabel(a))}: ${esc(a.title || a.name)} (${st})">
     <span class="bubble">${BUBBLE[st] ?? ""}</span>
+    ${a.waiting ? `<span class="mail" title="${a.waiting} message(s) waiting for this agent">📬${a.waiting}</span>` : ""}
     <span class="sprite" aria-hidden="true">${SPRITES[a.kind] || "🐾"}</span>
     <span class="name">${esc(a.title || a.name)}</span>${hay(a)}</button>`;
 }
@@ -182,24 +240,30 @@ function render() {
   const working = all.filter(a => a.status === "working").length;
   const blocked = all.filter(a => a.status === "blocked").length;
   const waiting = spaces.reduce((n, s) => n + (s.waiting_messages || 0), 0);
-  const decisionCount = spaces.reduce((n, s) => n + (s.decisions || []).length, 0);
+  const needCount = spaces.reduce((n, s) => n + (s.needs || []).length, 0);
   document.getElementById("chips").innerHTML =
     `<span class="chip"><b>${spaces.length}</b> fields</span>` +
     `<span class="chip"><b>${spaces.reduce((n, s) => n + s.farmers.length, 0)}</b> farmers</span>` +
     `<span class="chip"><b>${spaces.reduce((n, s) => n + s.farmers.reduce((m, f) => m + f.animals.length, 0) + s.loose.length, 0)}</b> animals</span>` +
     `<span class="chip"><b>${working}</b> at work</span>` +
-    (decisionCount ? `<span class="chip alert"><b>${decisionCount}</b> decisions need you</span>` : "") +
-    (blocked ? `<span class="chip alert"><b>${blocked}</b> blocked on a dialog</span>` : "") +
-    (waiting ? `<span class="chip"><b>${waiting}</b> messages waiting</span>` : "");
+    (needCount ? `<button class="chip alert" data-goto="needs" title="Go to what needs you"><b>${needCount}</b> need you</button>` : "") +
+    (blocked ? `<button class="chip alert" data-goto="needs" title="Go to what needs you"><b>${blocked}</b> blocked on a dialog</button>` : "") +
+    (waiting ? `<button class="chip" data-goto="mail" title="Go to who the messages are for"><b>${waiting}</b> messages waiting</button>` : "");
+  const needs = spaces.flatMap(s => (s.needs || []).map(n => ({ n, s })))
+    .sort((a, b) => a.n.priority.localeCompare(b.n.priority) || (a.n.since || 0) - (b.n.since || 0));
+  document.title = needs.length ? `(${needs.length}) The Farm` : "The Farm";
+  notifyNew(spaces);
   if (!spaces.length) { farm.innerHTML = `<div class="empty">No fields yet. Open a herdr space to plant one.</div>`; return; }
-  farm.innerHTML = spaces.map(s => `
+  const top = needs.length
+    ? `<section class="allneeds" id="needs" aria-label="Needs you"><h2>🔔 Needs you (${needs.length})</h2>
+         ${needs.map(x => needRow(x.n, x.s, true)).join("")}
+         <div class="meta" style="color:#6c6355;font-size:12px">Answer decisions in the lead farmer's pane, for example "D2 yes". Show me switches herdr to the right pane.</div></section>`
+    : `<div class="allclear">✅ Nothing needs you right now.</div>`;
+  farm.innerHTML = top + spaces.map(s => `
     <section class="field" aria-label="${esc(s.label)}">
-      <div class="field-head"><h2>🌾 ${esc(s.label)}</h2><span class="sub">${esc(s.id)} · ${esc(s.cwd || "")}</span></div>
-      ${(s.decisions || []).length ? `<div class="needs"><h3>🔔 Needs you · answer in the lead farmer's pane</h3>
-        ${[...s.decisions].sort((a, b) => a.priority.localeCompare(b.priority) || a.created - b.created).map(d => `
-          <div class="ask"><span class="id ${d.priority === "P1" ? "p1" : ""}">${esc(d.id)} ${esc(d.priority)}</span>
-            <span>${esc(d.question)}</span>
-            <span class="meta">from ${esc(d.lead)} · rec: <b>${esc(d.rec)}</b> · default: ${esc(d.default)} · ${ago(d.created)}</span></div>`).join("")}
+      <div class="field-head"><h2>🌾 ${esc(s.label)}</h2><span class="sub">${esc(s.cwd || "")}</span></div>
+      ${(s.needs || []).length ? `<div class="needs"><h3>🔔 Needs you</h3>
+        ${[...s.needs].sort((a, b) => a.priority.localeCompare(b.priority)).map(n => needRow(n, s, false)).join("")}
         </div>` : ""}
       <div class="field-body">
         <div class="farmhouse">
@@ -249,14 +313,31 @@ async function loadDetail() {
       <div>Context</div><div>${ctx}${a.compactions ? ` · compacted ${a.compactions}×` : ""}</div>
       <div>Started</div><div>${ago(a.started)}</div>
       <div>Last report</div><div>${ago(a.last_report)}</div>
-      <div>Pane</div><div>${esc(a.pane || "")} · ${esc(a.cwd || "")}</div>
+      <div>Where</div><div>${esc(a.where || a.tab_label || "?")} <button class="btn" data-focus="${esc(a.name)}">Show me</button></div>
+      <div>Folder</div><div>${esc(a.cwd || "")}</div>
     </div>
     ${a.last_report_text ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
     <div><div class="label">Live screen</div><div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></div>`;
 }
-document.getElementById("farm").addEventListener("click", e => {
+function goTo(target) {
+  const el = target === "needs" ? document.getElementById("needs")
+    : [...document.querySelectorAll(".who")].find(w => w.querySelector(".mail"));
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+}
+document.addEventListener("click", e => {
+  const g = e.target.closest("[data-goto]"); if (g) { goTo(g.dataset.goto); return; }
+  const f = e.target.closest("[data-focus]"); if (f) { e.stopPropagation(); focusAgent(f.dataset.focus); return; }
   const b = e.target.closest(".who"); if (b) openDetail(b.dataset.name);
 });
+document.getElementById("notify").addEventListener("click", async () => {
+  if (!("Notification" in window)) { alert("This browser does not support notifications."); return; }
+  if (localStorageGet("farm-notify") === "on") { localStorageSet("farm-notify", "off"); paintNotifyButton(); return; }
+  const p = await Notification.requestPermission();
+  localStorageSet("farm-notify", p === "granted" ? "on" : "off"); paintNotifyButton();
+});
+paintNotifyButton();
 document.getElementById("d-close").addEventListener("click", () => {
   openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
 });

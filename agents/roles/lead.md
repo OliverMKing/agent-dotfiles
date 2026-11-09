@@ -56,6 +56,9 @@ because you may run for days.
 
 ## Reporting and decisions
 
+When a report or decision mentions where something is, use names, never herdr IDs: the workspace
+name, then the tab title, then the pane title. Do not write IDs such as `w1` or `w1:pG`.
+
 Report to your lead farmer only with `~/agents/bin/agentctl report "<message>"`. Report when:
 - you reach a meaningful milestone,
 - you finish (state, open items, and cleanup that you did or still owe),

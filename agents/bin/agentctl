@@ -271,6 +271,20 @@ def agent_args(role, choice, cwd=None, outdir=None, specialty=None):
     return [*common, *trust, "--approve-for-me", "--add-dir", AGENTS, *extra_dirs()]
 
 
+def where(pane_id, with_workspace=True):
+    """A human location for a pane: “Workspace” › tab “Tab” › pane “Pane” (never raw IDs like w1:pG)."""
+    if not pane_id:
+        return "an unknown place"
+    pane = herdr("pane", "get", pane_id, check=False).get("pane") or {}
+    if not pane:
+        return "a pane that is gone"
+    tab = (herdr("tab", "get", pane["tab_id"], check=False).get("tab") or {}).get("label") or "?"
+    ws = (herdr("workspace", "get", pane["workspace_id"], check=False).get("workspace") or {}).get("label") or "?"
+    label = pane.get("label")
+    out = f"tab \u201c{tab}\u201d" + (f" \u203a pane \u201c{label}\u201d" if label and label != tab else "")
+    return (f"\u201c{ws}\u201d \u203a " + out) if with_workspace else out
+
+
 def agent_by_name(name):
     for a in herdr("agent", "list")["agents"]:
         if a.get("name") == name:
@@ -504,7 +518,7 @@ def cmd_spawn(a):
                    model=choice, outdir=outdir, specialty=a.specialty, animal=animal_for(a.role, a.specialty),
                    started=time.time(), last_report=0, state="pending")
         out.update(status="blocked_at_startup", hint="Likely a folder-trust dialog. Ask the user to answer it in "
-                   f"pane {pane}; then run: agentctl send-pending {name}.",
+                   f"{where(pane)}; then run: agentctl send-pending {name}.",
                    screen=str(screen.get("read", screen))[-800:])
         with open(os.path.join(space_dir(wid), f"pending-task-{name}.md"), "w") as f:
             f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
@@ -740,7 +754,7 @@ def _farm_agent(live, reg, kind):
             "context_window": reg.get("context_window"), "compactions": reg.get("compactions", 0),
             "last_report": reg.get("last_report"), "last_report_text": reg.get("last_report_text"),
             "parent": reg.get("parent"), "pane": live.get("pane_id"), "cwd": live.get("cwd") or reg.get("cwd"),
-            "started": reg.get("started")}
+            "tab": live.get("tab_id"), "started": reg.get("started")}
 
 
 def farm_state():
@@ -783,8 +797,48 @@ def farm_state():
             cwd = None
         open_decisions = [i for i in load_decisions(wid)["items"] if i["status"] == "open"] \
             if os.path.isdir(os.path.join(SPACES, wid)) else []
+        tabs = {t["tab_id"]: t["label"] for t in herdr("tab", "list", "--workspace", wid, check=False).get("tabs", [])}
+        needs = []
+        for d in open_decisions:
+            needs.append({"kind": "decision", "id": d["id"], "priority": d["priority"], "text": d["question"],
+                          "detail": f"rec: {d['rec']} · default: {d['default']}", "from": d["lead"],
+                          "since": d["created"], "focus": cos_name(wid)})
+        for a in here:
+            nm = a.get("name") or a["pane_id"]
+            if a["agent_status"] == "blocked":
+                needs.append({"kind": "dialog", "priority": "P1", "id": nm,
+                              "text": f"Waiting on a dialog in {where(a['pane_id'], with_workspace=False)}",
+                              "detail": screen_tail(nm, 3) if a.get("name") else "", "from": nm,
+                              "since": None, "focus": nm})
+            held = inbox_counts.get(a.get("name") or "", 0)
+            if held and a.get("name") and has_draft(a["name"]):
+                needs.append({"kind": "draft", "priority": "P2", "id": nm,
+                              "text": f"Your unsent draft in {where(a['pane_id'], with_workspace=False)} is holding "
+                                      f"{held} message(s) for {nm}", "detail": "Send or clear the draft to let them in.",
+                              "from": nm, "since": None, "focus": nm})
+        meta_cos = None
+        try:
+            meta_cos = json.load(open(os.path.join(SPACES, wid, "space.json"))).get("cos")
+        except (OSError, ValueError):
+            pass
+        if meta_cos and not lead_farmer:
+            needs.append({"kind": "down", "priority": "P1", "id": meta_cos,
+                          "text": f"The lead farmer of this field ({meta_cos}) is not running",
+                          "detail": f"Restart it: agentctl start-cos {wid}", "from": "watcher", "since": None,
+                          "focus": None})
+        for a in [lead_farmer, *farmers, *loose, *[x for f in farmers for x in f["animals"]]]:
+            if a:
+                a["waiting"] = inbox_counts.get(a["name"], 0)
+        for a in [lead_farmer, *farmers, *loose]:
+            if a:
+                a["tab_label"] = tabs.get(a.get("tab"))
+                a["where"] = where(a.get("pane"))
+        for f in farmers:
+            for x in f["animals"]:
+                x["tab_label"] = tabs.get(x.get("tab"))
+                x["where"] = where(x.get("pane"))
         spaces.append({"id": wid, "label": w.get("label") or wid, "cwd": cwd, "lead_farmer": lead_farmer,
-                       "decisions": open_decisions,
+                       "decisions": open_decisions, "needs": needs,
                        "farmers": farmers, "loose": loose,
                        "waiting_messages": sum(inbox_counts.get(a.get("name") or "", 0) for a in here)})
     return {"generated": time.time(), "spaces": spaces}
@@ -807,6 +861,7 @@ def cmd_farm(a):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import unquote
     page = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "farm", "index.html")
+    token = os.urandom(16).hex()  # embedded in the page; other sites cannot read it, so cannot POST
     cache = {"t": 0, "body": b""}
     lock = threading.Lock()
 
@@ -825,7 +880,8 @@ def cmd_farm(a):
         def do_GET(self):
             try:
                 if self.path in ("/", "/index.html"):
-                    self._send(200, open(page, "rb").read(), "text/html; charset=utf-8")
+                    html = open(page, encoding="utf-8").read().replace("__FARM_TOKEN__", token)
+                    self._send(200, html.encode(), "text/html; charset=utf-8")
                 elif self.path == "/api/farm":
                     with lock:
                         if time.time() - cache["t"] > 2:
@@ -839,6 +895,18 @@ def cmd_farm(a):
                     self._send(404, b"not found", "text/plain")
             except Exception as err:  # noqa: BLE001
                 self._send(500, json.dumps({"error": str(err)}).encode(), "application/json")
+
+        def do_POST(self):
+            if self.headers.get("X-Farm-Token") != token:
+                self._send(403, b"forbidden", "text/plain")
+                return
+            if self.path.startswith("/api/focus/"):
+                target = unquote(self.path[len("/api/focus/"):])
+                r = herdr("agent", "focus", target, check=False)
+                ok = "error" not in r
+                self._send(200 if ok else 404, json.dumps({"ok": ok}).encode(), "application/json")
+            else:
+                self._send(404, b"not found", "text/plain")
 
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
     log(f"the farm is open at http://127.0.0.1:{a.port}")
@@ -1061,7 +1129,7 @@ def deliver_loop():
                 if has_draft(agent):
                     if oldest > DRAFT_NAG_AFTER and nagged.get(agent) != len(msgs):
                         nagged[agent] = len(msgs)
-                        herdr("notification", "show", f"{agent}: {len(msgs)} message(s) waiting",
+                        herdr("notification", "show", f"{len(msgs)} message(s) waiting in {where(live['pane_id'])}",
                               "--body", "Your unsent draft in that pane is holding them back. "
                                         "Send or clear it to receive them.", check=False)
                     continue
@@ -1367,7 +1435,7 @@ open "Needs you" items.""")
                 self.stop = True
                 panes = {p["pane_id"] for p in herdr("pane", "list", check=False).get("panes", [])}
                 if e["pane"] in panes:  # pane still there: the agent died, it was not retired
-                    tell(e["parent"], f"{e['name']} ({e.get('title', '')}) is no longer running; pane {e['pane']} "
+                    tell(e["parent"], f"{e['name']} ({e.get('title', '')}) is no longer running; {where(e['pane'])} "
                                       "is back at a shell. Restart it with a summary of its progress, or retire it.")
                 return
         status, at = e.get("_last_status"), e.get("_status_at", now)
@@ -1381,10 +1449,10 @@ open "Needs you" items.""")
                 log(f"watch {e['name']}: first message was stuck in its input box; pressed Enter")
             else:
                 tell(e["parent"], f"{title} never started: its task is still unsent in its input box after "
-                                  f"pressing Enter. Check pane {e['pane']}.")
+                                  f"pressing Enter. Check {where(e['pane'])}.")
         if status == "blocked" and self.blocked_since and now - self.blocked_since >= BLOCKED_GRACE:
             self.blocked_since = float("inf")  # once per blocked episode
-            tell(e["parent"], f"{title} is blocked on a dialog in pane {e['pane']}: {screen_tail(e['name'])}. "
+            tell(e["parent"], f"{title} is blocked on a dialog in {where(e['pane'])}: {screen_tail(e['name'])}. "
                               "If it needs the user, add it to Needs you; do not answer it yourself.")
         if status in ("done", "idle") and self.turn_start and now - at >= SILENT_GRACE \
                 and self.alerted_turn != self.turn_start:
@@ -1408,8 +1476,8 @@ def watchdog_loop():
                         continue
                     if live["agent_status"] in ("blocked", "unknown"):
                         reg_update(e["workspace_id"], key, state="pending")
-                        tell(e.get("parent"), f"{key} ({e.get('title', '')}) is stuck at a startup dialog in pane "
-                                              f"{live['pane_id']} (usually folder trust): {screen_tail(key)}. Ask "
+                        tell(e.get("parent"), f"{key} ({e.get('title', '')}) is stuck at a startup dialog in "
+                                              f"{where(live['pane_id'])} (usually folder trust): {screen_tail(key)}. Ask "
                                               f"the user to answer it, then run: agentctl send-pending {key}")
                     else:
                         reg_update(e["workspace_id"], key, state="running")
@@ -1438,7 +1506,7 @@ def on_pane_gone(pane_id, exited):
             reg_update(e["workspace_id"], e["name"], state="exited" if exited else "closed", ended=time.time())
             if exited:
                 threading.Thread(target=tell, daemon=True, args=(
-                    e["parent"], f"{e['name']} ({e.get('title', '')}) exited; its pane {pane_id} is now a shell. "
+                    e["parent"], f"{e['name']} ({e.get('title', '')}) exited; its pane is now a shell. "
                                  "Restart it with a summary of its progress, or retire it.")).start()
     for wid in os.listdir(SPACES) if os.path.isdir(SPACES) else []:
         sp = os.path.join(SPACES, wid, "space.json")
@@ -1448,7 +1516,7 @@ def on_pane_gone(pane_id, exited):
             continue
         if meta.get("pane") == pane_id and exited:
             herdr("notification", "show", f"Lead farmer exited ({meta.get('label') or wid})",
-                  "--body", f"{meta.get('cos')} in pane {pane_id} exited. Restart: agentctl start-cos {wid}",
+                  "--body", f"{meta.get('cos')} exited in \u201c{meta.get('label') or wid}\u201d. Restart: agentctl start-cos {wid}",
                   "--sound", "request", check=False)
 
 
