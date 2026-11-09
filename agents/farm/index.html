@@ -317,6 +317,18 @@ async function loadDetail() {
   document.getElementById("d-sprite").textContent = SPRITES[a.kind] || "🐾";
   document.getElementById("d-name").textContent = a.title || a.name;
   document.getElementById("d-kind").textContent = `${kindLabel(a)} · ${a.name}`;
+  const content = document.getElementById("d-content");
+  // keep the reader's place: skip identical refreshes and refreshes while text is selected
+  const sel = window.getSelection();
+  if (sel && sel.toString() && content.contains(sel.anchorNode)) return;
+  const sig = JSON.stringify([a.status, a.last_report, a.context_tokens, a.compactions, a.screen, a.last_report_text]);
+  if (content.dataset.name === a.name && content.dataset.sig === sig) return;
+  const oldPre = content.querySelector("pre.screen");
+  const sameAgent = content.dataset.name === a.name;
+  const preTop = oldPre ? oldPre.scrollTop : 0;
+  const atBottom = !oldPre || oldPre.scrollHeight - oldPre.scrollTop - oldPre.clientHeight < 8;
+  const contentTop = content.scrollTop;
+  content.dataset.name = a.name; content.dataset.sig = sig;
   const color = { working: "var(--working)", blocked: "var(--blocked)" }[a.status] || "var(--idle)";
   const ctx = a.context_tokens ? `${Math.round(a.context_tokens / 1000)}k / ${Math.round(a.context_window / 1000)}k` : "unknown";
   document.getElementById("d-content").innerHTML = `
@@ -332,6 +344,13 @@ async function loadDetail() {
     </div>
     ${a.last_report_text ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
     <div><div class="label">Live screen</div><div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></div>`;
+  const pre = content.querySelector("pre.screen");
+  if (sameAgent) {
+    content.scrollTop = contentTop;
+    pre.scrollTop = atBottom ? pre.scrollHeight : preTop;  // follow new output only if already at the bottom
+  } else {
+    pre.scrollTop = pre.scrollHeight;  // a new agent opens at its latest output, like a terminal
+  }
 }
 function goTo(target) {
   const el = target === "needs" ? document.getElementById("needs")
@@ -342,6 +361,7 @@ function goTo(target) {
 }
 function closeDetail() {
   openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
+  const c = document.getElementById("d-content"); c.dataset.name = ""; c.dataset.sig = "";
 }
 document.addEventListener("click", e => {
   // a click outside the drawer closes it (clicking another farmer or animal switches to them)
