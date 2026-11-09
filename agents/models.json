@@ -1,0 +1,11 @@
+{
+  "_comment": "Vendor is chosen at random for every new agent. Tier picks the model. Prices are copilot-api units per 1M tokens (input/output). Not used on purpose: gpt-6-astra (1000/5000), gpt-5.6-sol-fast (800/4000), gpt-5.6-sol (400/2000).",
+  "vendors": ["claude", "codex"],
+  "tiers": {
+    "light":    {"claude": {"model": "haiku",  "effort": "medium"}, "codex": {"model": "gpt-6-luna",    "effort": "medium"}},
+    "standard": {"claude": {"model": "sonnet", "effort": "high"},   "codex": {"model": "gpt-6.1-terra", "effort": "high"}},
+    "heavy":    {"claude": {"model": "opus",   "effort": "high"},   "codex": {"model": "gpt-6.1-sol",   "effort": "high"}},
+    "cos":      {"claude": {"model": "sonnet", "effort": "high"},   "codex": {"model": "gpt-6.1-sol",   "effort": "medium"}}
+  },
+  "default_tier": {"chief-of-staff": "cos", "lead": "standard", "worker": "standard", "reviewer": "standard"}
+}

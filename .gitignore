@@ -1,0 +1,6 @@
+# personal / runtime state (lives in ~/agents, never committed)
+agents/context.md
+agents/spaces/
+agents/.build/
+__pycache__/
+*.pyc

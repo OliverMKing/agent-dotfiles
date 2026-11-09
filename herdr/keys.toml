@@ -1,0 +1,25 @@
+# >>> agent-dotfiles quick actions >>>
+[[keys.command]]
+key = "prefix+shift+v"
+type = "plugin_action"
+command = "agent-dotfiles.quick-actions.open-vscode"
+description = "open in VS Code"
+
+[[keys.command]]
+key = "prefix+alt+r"
+type = "plugin_action"
+command = "agent-dotfiles.quick-actions.review-changes"
+description = "review changes (file viewer + pi)"
+
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "herdr-file-viewer.open-file-viewer"
+description = "file viewer / changes (split)"
+
+[[keys.command]]
+key = "prefix+shift+f"
+type = "plugin_action"
+command = "herdr-file-viewer.open-file-viewer-tab"
+description = "file viewer / changes (tab)"
+# <<< agent-dotfiles quick actions <<<

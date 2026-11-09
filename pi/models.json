@@ -1,0 +1,24 @@
+{
+  "providers": {
+    "copilot-claude": {
+      "baseUrl": "http://localhost:4141",
+      "api": "anthropic-messages",
+      "apiKey": "!printf '%s' \"${GITHUB_COPILOT_API_KEY:-copilot-api}\"",
+      "models": [
+        { "id": "claude-haiku-5-5",  "name": "Claude Haiku 5.5 (copilot)",  "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 32000 },
+        { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5 (copilot)", "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000 },
+        { "id": "claude-opus-5-5",   "name": "Claude Opus 5.5 (copilot)",   "reasoning": true, "input": ["text", "image"], "contextWindow": 200000, "maxTokens": 64000 }
+      ]
+    },
+    "copilot-openai": {
+      "baseUrl": "http://localhost:4141/v1",
+      "api": "openai-responses",
+      "apiKey": "!printf '%s' \"${GITHUB_COPILOT_API_KEY:-copilot-api}\"",
+      "models": [
+        { "id": "gpt-6-luna",    "name": "GPT-6 Luna (copilot)",    "reasoning": true, "input": ["text", "image"], "contextWindow": 272000, "maxTokens": 64000 },
+        { "id": "gpt-6.1-terra", "name": "GPT-6.1 Terra (copilot)", "reasoning": true, "input": ["text", "image"], "contextWindow": 272000, "maxTokens": 64000 },
+        { "id": "gpt-6.1-sol",   "name": "GPT-6.1 Sol (copilot)",   "reasoning": true, "input": ["text", "image"], "contextWindow": 272000, "maxTokens": 64000 }
+      ]
+    }
+  }
+}

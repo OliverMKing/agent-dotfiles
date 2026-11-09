@@ -1,0 +1,12 @@
+[Unit]
+Description=Start a chief-of-staff agent in every new herdr workspace
+
+[Service]
+Environment=HERDR_SOCKET_PATH=%h/.config/herdr/herdr.sock
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 %h/agents/bin/agentctl watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

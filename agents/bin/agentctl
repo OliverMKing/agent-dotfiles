@@ -1,0 +1,496 @@
+#!/usr/bin/env python3
+"""agentctl - per-space chief-of-staff agents on herdr.
+
+  agentctl watch                      daemon: start a CoS in every newly created herdr workspace
+  agentctl start-cos [WORKSPACE_ID]   start a CoS in a workspace (default: the current one)
+  agentctl spawn ROLE SLUG --title T --task T
+                                      (CoS/leads) start an agent: leads get a tab labeled TITLE;
+                                      workers/reviewers split into their lead's tab
+  agentctl report TEXT                (any child) send TEXT to the parent agent's pane
+  agentctl needs-you TEXT             (CoS) alert the user that a decision is waiting
+  agentctl ls                         agents in this space
+
+Roles: lead, worker, reviewer (role prompts in ~/agents/roles/).
+"""
+import argparse
+import json
+import os
+import random
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+HOME = os.path.expanduser("~")
+AGENTS = os.path.join(HOME, "agents")
+ROLES = os.path.join(AGENTS, "roles")
+SPACES = os.path.join(AGENTS, "spaces")
+SETTINGS = os.path.join(AGENTS, "settings.json")
+# Claude Code's auto-memory dir for $HOME (e.g. ~/.claude/projects/-home-alice/memory); optional.
+MEMDIR = os.path.join(HOME, ".claude", "projects", HOME.replace("/", "-"), "memory")
+CONTEXT = os.path.join(AGENTS, "context.md")  # personal, not in git: who the user is, repo rules
+BUILD = os.path.join(AGENTS, ".build")
+SOCK = os.environ.get("HERDR_SOCKET_PATH", os.path.join(HOME, ".config", "herdr", "herdr.sock"))
+SELF = os.path.abspath(__file__)
+NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+PANES_PER_TAB = 4
+COS_LABEL = "chief of staff"
+TITLE_MAX = 40
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
+
+
+def herdr(*args, check=True):
+    env = dict(os.environ, HERDR_SOCKET_PATH=SOCK)
+    p = subprocess.run(["herdr", *args], capture_output=True, text=True, env=env)
+    out = p.stdout.strip() or p.stderr.strip()
+    try:
+        data = json.loads(out) if out else {}
+    except json.JSONDecodeError:
+        data = {"raw": out}
+    if check and (p.returncode != 0 or "error" in data):
+        raise HerdrError(data.get("error", {}).get("code", "error"), data.get("error", {}).get("message", out))
+    return data.get("result", data)
+
+
+class HerdrError(Exception):
+    def __init__(self, code, msg):
+        super().__init__(f"{code}: {msg}")
+        self.code = code
+
+
+MODELS = os.path.join(AGENTS, "models.json")
+
+
+def _under(path, roots):
+    path = os.path.realpath(path)
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in map(os.path.realpath, roots))
+
+
+def git_root(cwd):
+    r = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    return r.stdout.strip() or cwd
+
+
+def trusted_by(cwd):
+    """Which vendors the user has already trusted this folder (or a parent) for."""
+    out = set()
+    try:
+        projects = json.load(open(os.path.join(HOME, ".claude.json"))).get("projects", {})
+        roots = [k for k, v in projects.items() if v.get("hasTrustDialogAccepted")]
+        if _under(cwd, roots):
+            out.add("claude")
+    except (OSError, ValueError):
+        pass
+    try:
+        roots = re.findall(r'^\[projects\."([^"]+)"\]\s*\ntrust_level\s*=\s*"trusted"',
+                           open(os.path.join(HOME, ".codex", "config.toml")).read(), re.M)
+        # codex keys trust on the git root (or the folder itself); parents do not count
+        root = git_root(cwd)
+        if any(os.path.realpath(r) in (os.path.realpath(root), os.path.realpath(cwd)) for r in roots):
+            out.add("codex")
+    except OSError:
+        pass
+    return out
+
+
+def pick(role, tier=None, vendor=None, cwd=None):
+    """Random vendor (unless forced) + model for the tier. Returns dict(vendor, model, effort, tier).
+
+    Trust: Claude-trusted folders are usable by both (codex gets a per-session trust override);
+    a Codex-only-trusted folder forces codex; untrusted folders stay random and prompt the user.
+    """
+    cfg = json.load(open(MODELS))
+    tier = tier or cfg["default_tier"][role]
+    vendors = cfg["vendors"]
+    if cwd and trusted_by(cwd) == {"codex"}:
+        vendors = ["codex"]
+    vendor = vendor or os.environ.get("AGENTCTL_FORCE_VENDOR") or random.choice(vendors)
+    m = cfg["tiers"][tier][vendor]
+    return {"vendor": vendor, "model": m["model"], "effort": m["effort"], "tier": tier}
+
+
+def role_text(role):
+    """The role prompt plus the user's personal context file, if present."""
+    text = open(os.path.join(ROLES, f"{role}.md")).read()
+    if os.path.exists(CONTEXT):
+        text += "\n\n# User context\n\n" + open(CONTEXT).read()
+    return text
+
+
+def role_file(role):
+    os.makedirs(BUILD, exist_ok=True)
+    path = os.path.join(BUILD, f"{role}.md")
+    with open(path, "w") as f:
+        f.write(role_text(role))
+    return path
+
+
+def codex_profile(role):
+    """Write ~/.codex/herdr-<role>.config.toml carrying the role prompt as developer_instructions."""
+    text = role_text(role).replace("\'\'\'", "' ' '")
+    if role == "reviewer":
+        text += "\n\nYou are read-only: never edit files or apply patches.\n"
+    path = os.path.join(HOME, ".codex", f"herdr-{role}.config.toml")
+    with open(path, "w") as f:
+        f.write("# generated by agentctl from roles/%s.md + context.md; do not edit\n" % role)
+        f.write("developer_instructions = \'\'\'\n" + text + "\n\'\'\'\n")
+    return f"herdr-{role}"
+
+
+def extra_dirs():
+    return ["--add-dir", MEMDIR] if os.path.isdir(MEMDIR) else []
+
+
+def agent_args(role, choice, cwd=None):
+    if choice["vendor"] == "claude":
+        a = ["--model", choice["model"], "--effort", choice["effort"], "--permission-mode", "auto",
+             "--settings", SETTINGS, "--add-dir", AGENTS, *extra_dirs(),
+             "--append-system-prompt-file", role_file(role)]
+        if role == "reviewer":
+            a += ["--disallowed-tools", "Edit", "Write", "NotebookEdit"]
+        return a
+    # codex: --no-daemon so shell commands inherit this pane's env (HERDR_*, AGENT_*);
+    # --approve-for-me = automatic approval review (closest to claude auto mode);
+    # network on so herdr socket / az / git work inside the workspace-write sandbox.
+    trust = []
+    if cwd and "claude" in trusted_by(cwd) and "codex" not in trusted_by(cwd):
+        # The user already trusted this folder in Claude: mirror it for this session only (not saved).
+        root = git_root(cwd)
+        # one inline table: codex's -c splits dotted keys and can't address a quoted path key
+        paths = dict.fromkeys([root, cwd])
+        trust = ["-c", "projects={" + ", ".join(f'{json.dumps(x)} = {{ trust_level = "trusted" }}' for x in paths) + "}"]
+    return ["--no-daemon", "-p", codex_profile(role), "-m", choice["model"], *trust,
+            "-c", f'model_reasoning_effort="{choice["effort"]}"',
+            "-c", "sandbox_workspace_write.network_access=true",
+            "-c", "check_for_update_on_startup=false",
+            "--approve-for-me", "--add-dir", AGENTS, *extra_dirs()]
+
+
+def agent_by_name(name):
+    for a in herdr("agent", "list")["agents"]:
+        if a.get("name") == name:
+            return a
+    return None
+
+
+def pane_has_agent(pane_id):
+    for p in herdr("pane", "list")["panes"]:
+        if p["pane_id"] == pane_id:
+            return bool(p.get("agent"))
+    return True
+
+
+def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, timeout_ms=60000):
+    """Start a random-vendor agent in pane; fall back to the other vendor if launch fails.
+    Returns (state, choice): state is 'ready' or 'blocked' (e.g. trust dialog)."""
+    first = pick(role, tier, vendor, cwd)
+    other = "codex" if first["vendor"] == "claude" else "claude"
+    forced = vendor or (cwd and trusted_by(cwd) == {"codex"})
+    tries = [first] if forced else [first, pick(role, first["tier"], other)]
+    last = None
+    for choice in tries:
+        for _ in range(15):
+            try:
+                herdr("agent", "start", name, "--kind", choice["vendor"], "--pane", pane,
+                      "--timeout", str(timeout_ms), "--", *agent_args(role, choice, cwd))
+                return "ready", choice
+            except HerdrError as e:
+                if e.code == "agent_not_ready":
+                    return "blocked", choice
+                last = e
+                if "not at" in str(e) or "available" in str(e) or "shell" in str(e):
+                    time.sleep(1)  # shell still booting
+                    continue
+                break  # real launch failure: try the other vendor
+        log(f"{name}: {choice['vendor']} launch failed: {last}")
+        # the failed program may still be in the pane; get back to a shell prompt
+        herdr("pane", "send-keys", pane, "ctrl+c", check=False)
+        time.sleep(1)
+    raise last
+
+
+def wait_idle(name, timeout_ms):
+    try:
+        r = herdr("agent", "wait", name, "--until", "idle", "--until", "done", "--timeout", str(timeout_ms))
+        return r.get("agent", {}).get("agent_status") in ("idle", "done")
+    except HerdrError:
+        return False
+
+
+def space_dir(wid):
+    d = os.path.join(SPACES, wid)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# ------------------------------------------------------------------ CoS
+
+COS_FIRST = """You are the chief of staff for herdr space {wid} ("{label}"), started in {cwd}.
+Your agent name is {name}. You run on {model}. Your state directory is {sdir}.
+Read your role (system prompt). Then, in at most 4 lines: say what you infer this space is for
+(from its label, working directory, and git state if any), and ask the user what they want done here."""
+
+
+def start_cos(wid, wait_trust_ms=900000):
+    name = f"cos-{wid.lower()}"
+    if not NAME_RE.match(name):
+        raise SystemExit(f"bad workspace id for agent name: {wid}")
+    if agent_by_name(name):
+        log(f"{name} already running")
+        return name
+    ws = herdr("workspace", "get", wid)["workspace"]
+    panes = [p for p in herdr("pane", "list", "--workspace", wid)["panes"]]
+    free = [p for p in panes if not p.get("agent")]
+    if not free:
+        log(f"{wid}: no free shell pane, not starting CoS")
+        return None
+    pane = sorted(free, key=lambda p: (p["tab_id"], int(p["pane_id"].split(":p")[-1])))[0]
+    sdir = space_dir(wid)
+    with open(os.path.join(sdir, "space.json"), "w") as f:
+        json.dump({"workspace_id": wid, "label": ws.get("label"), "cwd": pane.get("cwd"),
+                   "cos": name, "pane": pane["pane_id"], "started": time.time()}, f, indent=1)
+    log(f"{wid}: starting {name} in {pane['pane_id']}")
+    if sum(1 for p in panes if p["tab_id"] == pane["tab_id"]) == 1:
+        herdr("tab", "rename", pane["tab_id"], COS_LABEL, check=False)
+    herdr("pane", "rename", pane["pane_id"], COS_LABEL, check=False)
+    state, choice = start_agent(name, pane["pane_id"], "chief-of-staff", cwd=pane.get("cwd"))
+    with open(os.path.join(sdir, "space.json"), "r+") as f:
+        meta = json.load(f); meta["cos_model"] = choice; f.seek(0); json.dump(meta, f, indent=1); f.truncate()
+    log(f"{name}: {choice['vendor']} {choice['model']} ({choice['effort']})")
+    if state == "blocked":
+        log(f"{name}: waiting for the user to answer a startup dialog (trust?) in {pane['pane_id']}")
+        if not wait_idle(name, wait_trust_ms):
+            log(f"{name}: never became ready; leaving it")
+            return None
+    herdr("agent", "prompt", name, COS_FIRST.format(
+        wid=wid, label=ws.get("label"), cwd=pane.get("cwd"), name=name, sdir=sdir,
+        model=f"{choice['vendor']} {choice['model']} ({choice['effort']} effort)"))
+    log(f"{name}: ready")
+    return name
+
+
+# ------------------------------------------------------------------ spawn
+
+CHILD_HEADER = """You are {name} (role: {role}) in herdr space {wid}. Your parent agent is {parent}.
+Report to your parent ONLY with: ~/agents/bin/agentctl report "<message>"
+(milestones, when you need a decision, when blocked, when done). Your task:
+
+{task}"""
+
+
+def my_name():
+    if os.environ.get("AGENT_NAME"):
+        return os.environ["AGENT_NAME"]
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        try:
+            a = herdr("agent", "get", pane)["agent"]
+            if a.get("name"):
+                return a["name"]
+        except HerdrError:
+            pass
+    raise SystemExit("cannot determine my agent name (not in a named herdr agent pane)")
+
+
+def place_pane(wid, role, slug, title, parent, cwd, env):
+    """Open the pane for a new agent and name its tab/pane.
+
+    - lead, or anything the CoS starts: its own tab, labeled with the descriptive title.
+    - worker/reviewer started by a lead: a split in the lead's tab (max PANES_PER_TAB), the pane
+      labeled with the title; overflow goes to a new tab labeled with the title.
+    """
+    env_args = [x for k, v in env.items() for x in ("--env", f"{k}={v}")]
+    parent_slug = parent.split("-", 1)[1] if parent.startswith(f"{wid.lower()}-") else None
+    my_tab = os.environ.get("HERDR_TAB_ID")
+    if role != "lead" and parent_slug and my_tab:
+        tab_panes = [p for p in herdr("pane", "list", "--workspace", wid)["panes"] if p["tab_id"] == my_tab]
+        if len(tab_panes) < PANES_PER_TAB:
+            last = sorted(tab_panes, key=lambda p: int(p["pane_id"].split(":p")[-1]))[-1]
+            direction = "right" if len(tab_panes) % 2 == 1 else "down"
+            pane = herdr("pane", "split", last["pane_id"], "--direction", direction, "--cwd", cwd,
+                         "--no-focus", *env_args)["pane"]["pane_id"]
+            herdr("pane", "rename", pane, title, check=False)
+            return pane
+    label = title
+    r = herdr("tab", "create", "--workspace", wid, "--label", label, "--cwd", cwd, "--no-focus", *env_args)
+    pane = r["root_pane"]["pane_id"]
+    herdr("pane", "rename", pane, title, check=False)
+    return pane
+
+
+def cmd_spawn(a):
+    wid = os.environ.get("HERDR_WORKSPACE_ID")
+    if not wid:
+        raise SystemExit("spawn must run inside a herdr pane")
+    parent = my_name()
+    slug = re.sub(r"[^a-z0-9_-]", "-", a.slug.lower()).strip("-")
+    name = f"{wid.lower()}-{slug}"[:32]
+    if not NAME_RE.match(name):
+        raise SystemExit(f"invalid agent name {name}")
+    if agent_by_name(name):
+        raise SystemExit(f"agent {name} already exists; pick another slug or message it")
+    task = a.task if a.task != "-" else sys.stdin.read()
+    cwd = os.path.abspath(os.path.expanduser(a.cwd or os.getcwd()))
+    env = {"AGENT_NAME": name, "AGENT_PARENT": parent, "AGENT_ROLE": a.role, "AGENT_SPACE": wid}
+    title = " ".join(a.title.split())
+    if len(title.split()) < 2 or title.lower().replace(" ", "-") == slug:
+        raise SystemExit("--title must say what the agent does, in 2+ words "
+                         "(e.g. 'review auth token refresh PR'), not just the area")
+    if len(title) > TITLE_MAX:
+        raise SystemExit(f"--title is {len(title)} chars; keep it to {TITLE_MAX} so the tab label is not cut off "
+                         "(verb + object, e.g. 'review auth token refresh PR')")
+    pane = place_pane(wid, a.role, slug, title, parent, cwd, env)
+    state, choice = start_agent(name, pane, a.role, a.tier, a.vendor, cwd)
+    out = {"name": name, "title": title, "pane": pane, "role": a.role, "parent": parent, "cwd": cwd,
+           "model": choice}
+    if state == "blocked":
+        screen = herdr("agent", "read", name, "--source", "visible", check=False)
+        out.update(status="blocked_at_startup", hint="Likely a folder-trust dialog. Ask the user to answer it in "
+                   f"pane {pane}; then run: agentctl send-pending {name}.",
+                   screen=str(screen.get("read", screen))[-800:])
+        with open(os.path.join(space_dir(wid), f"pending-task-{name}.md"), "w") as f:
+            f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task))
+        print(json.dumps(out, indent=1))
+        sys.exit(3)
+    herdr("agent", "prompt", name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task))
+    out["status"] = "started"
+    print(json.dumps(out, indent=1))
+
+
+def cmd_send_pending(a):
+    """Deliver a task that was held because the child was blocked at startup."""
+    wid = os.environ.get("HERDR_WORKSPACE_ID") or (agent_by_name(a.name) or {}).get("workspace_id") or a.name.split("-")[0]
+    path = os.path.join(space_dir(wid), f"pending-task-{a.name}.md")
+    if not wait_idle(a.name, 5000):
+        raise SystemExit(f"{a.name} is not idle yet (still blocked?)")
+    herdr("agent", "prompt", a.name, open(path).read())
+    os.remove(path)
+    print(json.dumps({"name": a.name, "status": "task_sent"}))
+
+
+def cmd_report(a):
+    parent = os.environ.get("AGENT_PARENT")
+    if not parent:
+        raise SystemExit("AGENT_PARENT not set; you are not a spawned agent")
+    me = os.environ.get("AGENT_NAME", "?")
+    text = a.text if a.text != "-" else sys.stdin.read()
+    for attempt in range(20):
+        try:
+            herdr("agent", "prompt", parent, f"[from {me}] {text}")
+            print(json.dumps({"delivered_to": parent}))
+            return
+        except HerdrError as e:
+            if e.code != "agent_blocked":
+                raise SystemExit(str(e))
+            time.sleep(15)  # parent is at a dialog the user must answer; retry for ~5 min
+    raise SystemExit(f"{parent} stayed blocked; report not delivered")
+
+
+def cmd_needs_you(a):
+    """CoS: raise a herdr alert (request sound) that the user must decide something."""
+    wid = os.environ.get("HERDR_WORKSPACE_ID")
+    label = wid or "?"
+    if wid:
+        try:
+            label = herdr("workspace", "get", wid)["workspace"].get("label") or wid
+        except HerdrError:
+            pass
+    text = a.text if a.text != "-" else sys.stdin.read()
+    r = herdr("notification", "show", f"Chief of staff · {label}: needs you", "--body", text[:300],
+              "--sound", "request", check=False)
+    print(json.dumps({"shown": r.get("shown"), "reason": r.get("reason")}))
+
+
+def cmd_ls(a):
+    wid = a.workspace or os.environ.get("HERDR_WORKSPACE_ID")
+    rows = [x for x in herdr("agent", "list")["agents"] if not wid or x["workspace_id"] == wid]
+    for x in rows:
+        print(f"{x.get('name') or '-':<32} {x['agent_status']:<8} {x['pane_id']:<8} {x.get('cwd', '')}")
+
+
+def cmd_start_cos(a):
+    wid = a.workspace or os.environ.get("HERDR_WORKSPACE_ID")
+    if not wid:
+        raise SystemExit("give a workspace id")
+    print(start_cos(wid))
+
+
+# ------------------------------------------------------------------ watcher
+
+def cmd_watch(a):
+    seen = set()
+    while True:
+        try:
+            s = socket.socket(socket.AF_UNIX)
+            s.connect(SOCK)
+            req = {"id": "agentctl-watch", "method": "events.subscribe",
+                   "params": {"subscriptions": [{"type": "workspace.created"}, {"type": "workspace.closed"}]}}
+            s.sendall((json.dumps(req) + "\n").encode())
+            f = s.makefile()
+            log("subscribed:", f.readline().strip()[:120])
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                kind = ev.get("event")
+                data = ev.get("data", {})
+                if kind == "workspace_created":
+                    wid = data.get("workspace", {}).get("workspace_id")
+                    if wid and wid not in seen:
+                        seen.add(wid)
+                        threading.Thread(target=safe_start_cos, args=(wid,), daemon=True).start()
+                elif kind == "workspace_closed":
+                    wid = data.get("workspace_id") or data.get("workspace", {}).get("workspace_id")
+                    if wid and os.path.isdir(os.path.join(SPACES, wid)):
+                        dst = os.path.join(SPACES, "_closed", f"{wid}-{int(time.time())}")
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        os.rename(os.path.join(SPACES, wid), dst)
+                        log(f"{wid}: closed, state archived to {dst}")
+            log("event stream ended; reconnecting")
+        except OSError as e:
+            log("socket error:", e)
+        time.sleep(3)
+
+
+def safe_start_cos(wid):
+    time.sleep(1.5)  # let the new shell reach its prompt
+    try:
+        start_cos(wid)
+    except Exception as e:  # noqa: BLE001
+        log(f"{wid}: start_cos failed: {e}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="agentctl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s = p.add_subparsers(dest="cmd", required=True)
+    s.add_parser("watch").set_defaults(f=cmd_watch)
+    x = s.add_parser("start-cos"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_start_cos)
+    x = s.add_parser("spawn")
+    x.add_argument("role", choices=["lead", "worker", "reviewer"])
+    x.add_argument("slug", help="short id for the agent name, e.g. dd-kv-cert")
+    x.add_argument("--title", required=True,
+                   help="tab/pane label saying what it does, 2+ words, <=40 chars, "
+                        "e.g. 'review auth token refresh PR'")
+    x.add_argument("--task", required=True, help="first message; '-' reads stdin")
+    x.add_argument("--cwd")
+    x.add_argument("--tier", choices=["light", "standard", "heavy"],
+                   help="light=lookups/mechanical, standard=default, heavy=hard debugging/design/RCA/security")
+    x.add_argument("--vendor", choices=["claude", "codex"], help="force a vendor (default: random)")
+    x.set_defaults(f=cmd_spawn)
+    x = s.add_parser("send-pending"); x.add_argument("name"); x.set_defaults(f=cmd_send_pending)
+    x = s.add_parser("report"); x.add_argument("text"); x.set_defaults(f=cmd_report)
+    x = s.add_parser("ls"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_ls)
+    x = s.add_parser("needs-you", help="(CoS) alert the user that a decision is waiting")
+    x.add_argument("text"); x.set_defaults(f=cmd_needs_you)
+    a = p.parse_args()
+    a.f(a)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f *)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(git push * +*)",
+      "Bash(git push * --delete *)",
+      "Bash(git push * master*)",
+      "Bash(git push * main*)",
+      "Bash(git push * dependabot/*)",
+      "Bash(az repos pr update * --status completed*)",
+      "Bash(az repos pr update * --auto-complete true*)",
+      "Bash(az repos pr update * --status abandoned*)",
+      "Bash(gh pr merge*)",
+      "Bash(herdr server stop*)",
+      "Bash(herdr workspace create*)",
+      "Bash(herdr workspace close*)",
+      "Bash(herdr worktree *)"
+    ]
+  }
+}

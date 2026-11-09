@@ -1,0 +1,20 @@
+id = "agent-dotfiles.quick-actions"
+name = "Quick actions"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Quick actions: open in VS Code; review changes with the file viewer and pi."
+platforms = ["linux"]
+
+[[actions]]
+id = "open-vscode"
+title = "Open in VS Code"
+description = "Open the focused pane's git root (or folder) in VS Code."
+contexts = ["workspace"]
+command = ["python3", "-I", "open_vscode.py"]
+
+[[actions]]
+id = "review-changes"
+title = "Review changes (file viewer + pi)"
+description = "New tab: file viewer on the repo's changes, plus a read-only pi agent reviewing the diff."
+contexts = ["workspace"]
+command = ["python3", "-I", "review_changes.py"]
