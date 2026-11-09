@@ -454,7 +454,7 @@ def place_pane(wid, role, slug, title, parent, cwd, env):
     my_tab = os.environ.get("HERDR_TAB_ID")
     if role != "lead" and parent_slug and my_tab:
         tab_panes = [p for p in herdr("pane", "list", "--workspace", wid)["panes"] if p["tab_id"] == my_tab]
-        if len(tab_panes) < PANES_PER_TAB:
+        if tab_panes and len(tab_panes) < PANES_PER_TAB:  # (an unknown tab falls through to a new tab)
             # Herdr pane IDs are opaque handles, not decimal sequence numbers.
             last = tab_panes[-1]
             direction = "right" if len(tab_panes) % 2 == 1 else "down"
@@ -469,11 +469,66 @@ def place_pane(wid, role, slug, title, parent, cwd, env):
     return pane
 
 
+def spawn_limits():
+    lim = json.load(open(MODELS)).get("limits", {})
+    return lim.get("max_depth", 4), lim.get("max_live_children", 3)
+
+
+def check_nesting(parent, role, wid):
+    """Animals may start animals. Returns the new agent's depth, or exits with the reason."""
+    reg = {e["name"]: e for e in reg_all() if e.get("name")}
+    me = reg.get(parent, {})
+    my_role = me.get("role") or ("chief-of-staff" if parent.startswith((COS_PREFIX, "cos-")) else None)
+    if my_role in ANIMALS:
+        if role == "lead":
+            raise SystemExit("an animal cannot start a farmer; ask your parent if the work needs one")
+        if my_role in READ_ONLY_ROLES and role not in READ_ONLY_ROLES:
+            raise SystemExit(f"a read-only {my_role} can only start read-only animals (researcher or reviewer)")
+    depth = (me.get("depth") if me.get("depth") is not None else
+             {"chief-of-staff": 0, "lead": 1}.get(my_role, 2)) + 1
+    max_depth, max_children = spawn_limits()
+    if depth > max_depth:
+        raise SystemExit(f"too deep: this would be level {depth}, the limit is {max_depth}. Do the task yourself "
+                         "or report back to your parent")
+    live = [e for e in reg.values() if e.get("parent") == parent and e.get("state") in ("running", "starting", "pending")
+            and agent_by_name(e["name"])]
+    if len(live) >= max_children:
+        raise SystemExit(f"you already have {len(live)} live children (limit {max_children}): "
+                         + ", ".join(e["name"] for e in live) + ". Wait for one to finish first")
+    return depth
+
+
+def _can_write(d):
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, f".probe-{os.getpid()}")
+        open(probe, "w").close()
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
 def cmd_spawn(a):
     wid = os.environ.get("HERDR_WORKSPACE_ID")
     if not wid:
         raise SystemExit("spawn must run inside a herdr pane")
     parent = my_name()
+    depth = check_nesting(parent, a.role, wid)
+    if not (_can_write(space_dir(wid)) and _can_write(BUILD)):
+        # a sandboxed animal: hand the spawn to the watcher, which runs it with the same checks
+        outdir = os.environ.get("AGENT_OUTDIR")
+        if not outdir:
+            raise SystemExit("cannot write the agent state directory, and no output directory to queue a request")
+        task = a.task if a.task != "-" else sys.stdin.read()
+        req = {"ts": time.time(), "parent": parent, "wid": wid, "tab": os.environ.get("HERDR_TAB_ID"),
+               "pane": os.environ.get("HERDR_PANE_ID"), "role": a.role, "slug": a.slug, "title": a.title,
+               "task": task, "cwd": a.cwd or os.getcwd(), "tier": a.tier, "vendor": a.vendor, "specialty": a.specialty}
+        with open(os.path.join(outdir, "spawn-requests.jsonl"), "a") as f:
+            f.write(json.dumps(req) + "\n")
+        print(json.dumps({"status": "requested", "note": "the watcher starts it within a few seconds; its reports "
+                                                         "come to you as usual"}))
+        return
     slug = re.sub(r"[^a-z0-9_-]", "-", a.slug.lower()).strip("-")
     while slug.startswith(f"{wid.lower()}-"):  # callers sometimes pass the full agent name
         slug = slug[len(wid) + 1:]
@@ -515,7 +570,7 @@ def cmd_spawn(a):
     # visible from the start: a spawn that is cut off still leaves a registry entry
     reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
                outdir=outdir, specialty=a.specialty, animal=animal_for(a.role, a.specialty),
-               started=time.time(), last_report=0, state="starting")
+               depth=depth, started=time.time(), last_report=0, state="starting")
     pending_file = os.path.join(space_dir(wid), f"pending-task-{name}.md")
     extra = OUTDIR_NOTE.format(outdir=outdir, cwd=cwd) if outdir else ""
     with open(pending_file, "w") as f:  # kept until the task is submitted, for send-pending
@@ -586,6 +641,12 @@ def cmd_report(a):
         raise SystemExit("no parent: not a spawned or adopted agent (AGENT_PARENT unset, pane not registered)")
     text = a.text if a.text != "-" else sys.stdin.read()
     space = os.environ.get("AGENT_SPACE")
+    if a.final and me != "?":
+        mine = [e["name"] for e in reg_all() if e.get("parent") == me
+                and e.get("state") in ("running", "starting", "pending") and agent_by_name(e["name"])]
+        if mine:
+            raise SystemExit(f"your own animals are still running ({', '.join(mine)}). Wait for their final "
+                             "reports before your final report, or your pane closes and their reports are lost")
     where = enqueue(parent, f"[from {me}]{' [final]' if a.final else ''} {text}", me,
                     final=a.final, space=space)
     if space and me != "?":
@@ -811,7 +872,14 @@ def farm_state():
             if r.get("role") in ANIMALS:
                 animal = _farm_agent(a, r, r.get("animal") or ANIMALS[r["role"]]) | {
                     "specialty": r.get("specialty"), "role": r.get("role")}
-                (by_name[r["parent"]]["animals"] if r.get("parent") in by_name else loose).append(animal)
+                # nested animals stand in the plot of the farmer at the top of their family tree
+                anc, seen = r.get("parent"), set()
+                while anc and anc not in by_name and anc not in seen:
+                    seen.add(anc)
+                    anc = reg.get(anc, {}).get("parent")
+                if r.get("parent") not in by_name and anc in by_name:
+                    animal["via"] = r.get("parent")
+                (by_name[anc]["animals"] if anc in by_name else loose).append(animal)
             else:
                 loose.append(_farm_agent(a, r, "farmhand"))
         try:
@@ -1468,8 +1536,45 @@ def log_sent(sender, rec):
         pass
 
 
+def run_spawn_requests():
+    """Start children that sandboxed animals asked for (they cannot write the state files themselves)."""
+    if not os.path.isdir(SPACES):
+        return
+    for wid in os.listdir(SPACES):
+        for kind in ("research", "reviews"):
+            base = os.path.join(SPACES, wid, kind)
+            if not os.path.isdir(base):
+                continue
+            for agent in os.listdir(base):
+                q = os.path.join(base, agent, "spawn-requests.jsonl")
+                if not os.path.exists(q) or not os.path.getsize(q):
+                    continue
+                tmp = q + ".running"
+                os.replace(q, tmp)
+                for l in open(tmp):
+                    if not l.strip():
+                        continue
+                    r = json.loads(l)
+                    env = dict(os.environ, AGENT_NAME=r["parent"], HERDR_WORKSPACE_ID=r["wid"])
+                    if r.get("tab"):
+                        env["HERDR_TAB_ID"] = r["tab"]
+                    if r.get("pane"):
+                        env["HERDR_PANE_ID"] = r["pane"]
+                    cmd = [sys.executable, os.path.realpath(__file__), "spawn", r["role"], r["slug"],
+                           "--title", r["title"], "--cwd", r["cwd"], "--task", "-"]
+                    for flag in ("tier", "vendor", "specialty"):
+                        if r.get(flag):
+                            cmd += [f"--{flag}", r[flag]]
+                    p = subprocess.run(cmd, input=r["task"], capture_output=True, text=True, env=env)
+                    result = (p.stdout or p.stderr).strip()[-600:]
+                    enqueue(r["parent"], f"[spawn] {'started' if p.returncode == 0 else 'FAILED'}: {result}", "watchdog")
+                    log(f"spawn request from {r['parent']}: rc={p.returncode}")
+                os.remove(tmp)
+
+
 def drain_outboxes():
     """Move messages that sandboxed agents left in their output dirs into the inbox."""
+    run_spawn_requests()
     if not os.path.isdir(SPACES):
         return
     for wid in os.listdir(SPACES):

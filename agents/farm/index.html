@@ -305,11 +305,11 @@ function hay(a) {
 function who(a, small) {
   const st = a.status || "unknown";
   return `<button class="who ${small ? "small" : ""} ${st}" data-name="${esc(a.name)}"
-            title="${esc(kindLabel(a))}: ${esc(a.title || a.name)} (${st})">
+            title="${esc(kindLabel(a))}: ${esc(a.title || a.name)} (${st})${a.via ? " · started by " + esc(a.via) : ""}">
     <span class="bubble">${BUBBLE[st] ?? ""}</span>
     ${a.waiting ? `<span class="mail" title="${a.waiting} message(s) waiting for this agent">📬${a.waiting}</span>` : ""}
     <span class="sprite" aria-hidden="true">${SPRITES[a.kind] || "🐾"}</span>
-    <span class="name">${esc(a.title || a.name)}</span>${hay(a)}</button>`;
+    <span class="name">${a.via ? "↳ " : ""}${esc(a.title || a.name)}</span>${hay(a)}</button>`;
 }
 function render() {
   const farm = document.getElementById("farm");

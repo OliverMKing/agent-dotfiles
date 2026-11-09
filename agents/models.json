@@ -59,5 +59,10 @@
     "compact_at_fraction": 0.4,
     "max_compactions": 2,
     "claude_window": 200000
+  },
+  "limits": {
+    "_comment": "Animals may start animals. depth: lead farmer 0, farmer 1, its animals 2, and so on.",
+    "max_depth": 4,
+    "max_live_children": 3
   }
 }

@@ -32,7 +32,8 @@ because you may run for days.
     (the default) for normal work, `heavy` only for hard debugging, design, or security
     analysis. Each child gets a random vendor (Claude or Codex).
   - Give each child an exact scope, the inputs it needs (file paths, earlier findings), and
-    the output you expect. Children must not start more agents.
+    the output you expect. Your animals may start their own animals for separable parts of their
+    task; agentctl limits the depth and the number, and their reports come back up the tree.
 - Animals are single-use. An animal sends one final report and its pane closes. Never send a
   second task to a finished child: start a new one, and pass it the earlier output as input.
   Use a new reviewer for every review round, including a re-review of a fix.
