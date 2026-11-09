@@ -95,6 +95,8 @@ The service runs `agentctl watch`. The watcher listens for the herdr `workspace_
 
 Reports from farmers do not go into the conversation that you have with the lead farmer. When reports wait, the watcher types only one short line into its pane: `📬 N new report(s) from <names>. Read them with: agentctl inbox`. The lead farmer reads them with `agentctl inbox`, and it tells you about them only when something changed for you. It gets a new nudge only after it reads the earlier reports.
 
+You can also type to any agent from the farm page. The details panel of each agent has a message box, and the text goes into its pane as if you typed it there. The page does not send while you have unsent text in the terminal input of that agent, or while the agent waits on a dialog. Each decision on the "Needs you" board has an "Accept rec" button, which sends "D3: yes, go with your recommendation". It also has a "Reply…" button, which opens the lead farmer with "D3 " filled in.
+
 On the farm page, click the lead farmer to see "Your conversation". This view shows only your messages and its replies to them. It reads them from the transcript of the lead farmer and leaves out reports, watchdog notes, nudges and tool output. The full live screen is still available below the conversation.
 
 ### Decisions and alerts

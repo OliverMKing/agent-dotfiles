@@ -155,6 +155,12 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 :root[data-sky="night"] .msg.them { background: rgba(255,255,255,.05); }
 .msg small { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
 details.screenbox summary { cursor: pointer; }
+.composer { border-top: 1px solid var(--line); padding: 10px 16px 14px; display: grid; gap: 6px; }
+.composer textarea { width: 100%; min-height: 54px; max-height: 30vh; resize: vertical; font: inherit; font-size: 13.5px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; background: var(--card); color: var(--ink); }
+.composer .row { display: flex; gap: 8px; align-items: center; }
+.composer .hint { font-size: 12px; color: var(--muted); margin-right: auto; }
+.composer .err { font-size: 12px; color: var(--blocked); }
 pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 46vh; overflow: auto; }
 .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
 .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
@@ -179,6 +185,12 @@ pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, m
     <button class="close" id="d-close" aria-label="Close">✕</button>
   </header>
   <div class="content" id="d-content"></div>
+  <form class="composer" id="composer">
+    <textarea id="say" placeholder="Message this agent… (Enter sends, Shift+Enter for a new line)" aria-label="Message"></textarea>
+    <div class="row"><span class="hint" id="say-hint">Typed into its pane as if you typed it there.</span>
+      <button class="btn" type="submit">Send</button></div>
+    <div class="err" id="say-err" hidden></div>
+  </form>
 </aside>
 
 <script>
@@ -206,7 +218,8 @@ function needRow(n, s, showField) {
   const where = showField ? `${esc(s.label)} · ` : "";
   return `<div class="need"><span class="tag ${n.priority === "P1" ? "p1" : ""}">${esc(tag)}</span>
     <span>${esc(n.text)}</span>
-    ${n.focus ? `<span class="go"><button class="btn" data-focus="${esc(n.focus)}">Show me</button></span>` : `<span></span>`}
+    <span class="go">${n.kind === "decision" && n.focus ? `<button class="btn" data-answer="${esc(n.focus)}" data-text="${esc(`${n.id}: yes, go with your recommendation`)}">Accept rec</button>
+        <button class="btn quiet" data-reply="${esc(n.focus)}" data-prefill="${esc(n.id + " ")}">Reply…</button> ` : ""}${n.focus ? `<button class="btn quiet" data-focus="${esc(n.focus)}">Show me</button>` : ""}</span>
     <span class="meta">${where}from ${esc(n.from)}${n.since ? " · " + ago(n.since) : ""}${n.detail ? "\n" + esc(n.detail) : ""}</span></div>`;
 }
 async function focusAgent(name) {
@@ -374,6 +387,26 @@ async function loadDetail() {
     pre.scrollTop = pre.scrollHeight;  // a new agent opens at its latest output, like a terminal
   }
 }
+async function say(agent, text) {
+  const r = await fetch(`/api/say/${encodeURIComponent(agent)}`, { method: "POST",
+    headers: { "X-Farm-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  return { ok: r.ok && d.ok, reason: d.reason || `failed (${r.status})` };
+}
+document.getElementById("composer").addEventListener("submit", async e => {
+  e.preventDefault();
+  const box = document.getElementById("say"), err = document.getElementById("say-err");
+  const text = box.value.trim(); if (!text || !openName) return;
+  err.hidden = true; box.disabled = true;
+  const res = await say(openName, text);
+  box.disabled = false;
+  if (res.ok) { box.value = ""; document.getElementById("d-content").dataset.sig = ""; setTimeout(loadDetail, 1500); }
+  else { err.textContent = `Not sent: ${res.reason}`; err.hidden = false; }
+  box.focus();
+});
+document.getElementById("say").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); document.getElementById("composer").requestSubmit(); }
+});
 function goTo(target) {
   const el = target === "needs" ? document.getElementById("needs")
     : [...document.querySelectorAll(".who")].find(w => w.querySelector(".mail"));
@@ -389,6 +422,12 @@ document.addEventListener("click", e => {
   // a click outside the drawer closes it (clicking another farmer or animal switches to them)
   if (openName && !e.target.closest("#drawer") && !e.target.closest(".who")) closeDetail();
   const g = e.target.closest("[data-goto]"); if (g) { goTo(g.dataset.goto); return; }
+  const ans = e.target.closest("[data-answer]");
+  if (ans) { e.stopPropagation(); ans.disabled = true;
+    say(ans.dataset.answer, ans.dataset.text).then(r => { if (!r.ok) { alert(`Not sent: ${r.reason}`); ans.disabled = false; } else { ans.textContent = "Sent ✓"; } });
+    return; }
+  const rep = e.target.closest("[data-reply]");
+  if (rep) { e.stopPropagation(); openDetail(rep.dataset.reply).then(() => { const b = document.getElementById("say"); b.value = rep.dataset.prefill; b.focus(); }); return; }
   const f = e.target.closest("[data-focus]"); if (f) { e.stopPropagation(); focusAgent(f.dataset.focus); return; }
   const b = e.target.closest(".who"); if (b) openDetail(b.dataset.name);
 });
