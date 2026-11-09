@@ -844,6 +844,73 @@ def farm_state():
     return {"generated": time.time(), "spaces": spaces}
 
 
+AGENT_PREFIXES = ("[inbox]", "[from ", "[watch]", "\U0001F4EC", "You are the lead farmer", "You are the chief of staff",
+                  "Your context was reset", "Setup update", "/compact", "/clear", "/new", "<environment_context")
+
+
+def _human_text(t):
+    t = re.sub(r"^\s*<pasted_content[^>]*>\s*|\s*</pasted_content[^>]*>\s*$", "", t or "").strip()
+    if not t or t.startswith(AGENT_PREFIXES):
+        return None
+    # an old report that landed in the middle of the user's typing: keep only the user's part
+    cut = min([i for i in (t.find(" " + p) for p in ("[from ", "[watch]", "[inbox]")) if i > 0] or [len(t)])
+    return t[:cut].strip() or None
+
+
+def conversation(vendor, session_id, limit=40):
+    """Only the user's messages to this agent and its replies to them (no reports, notes, or tools)."""
+    import glob
+    out = []
+    if not session_id:
+        return out
+    try:
+        if vendor == "claude":
+            files = glob.glob(os.path.join(HOME, ".claude", "projects", "*", f"{session_id}.jsonl"))
+            human_turn = False
+            for line in _tail_lines(files[0], 8_000_000) if files else []:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("type") == "user" and not d.get("isMeta"):
+                    c = d["message"]["content"]
+                    texts = [c] if isinstance(c, str) else [x.get("text", "") for x in c if x.get("type") == "text"]
+                    if texts:
+                        t = _human_text(texts[0])
+                        human_turn = human_turn or t is not None  # queued messages can share one turn
+                        if t:
+                            out.append({"from": "you", "text": t, "ts": d.get("timestamp")})
+                elif d.get("type") == "assistant" and d["message"].get("stop_reason") == "end_turn":
+                    t = "\n".join(x.get("text", "") for x in d["message"]["content"] if x.get("type") == "text")
+                    if human_turn and t.strip():
+                        out.append({"from": "lead farmer", "text": t.strip(), "ts": d.get("timestamp")})
+                    human_turn = False
+        else:
+            files = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"*{session_id}*.jsonl"))
+            human_turn = False
+            for line in _tail_lines(files[0], 8_000_000) if files else []:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                p = d.get("payload") or {}
+                if d.get("type") != "response_item" or p.get("type") != "message":
+                    continue
+                t = "\n".join(c.get("text", "") for c in p.get("content", []) if isinstance(c, dict))
+                if p.get("role") == "user":
+                    h = _human_text(t)
+                    human_turn = human_turn or h is not None  # queued messages can share one turn
+                    if h:
+                        out.append({"from": "you", "text": h, "ts": d.get("timestamp")})
+                elif p.get("role") == "assistant" and p.get("phase") == "final_answer":
+                    if human_turn and t.strip():
+                        out.append({"from": "lead farmer", "text": t.strip(), "ts": d.get("timestamp")})
+                    human_turn = False
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    return out[-limit:]
+
+
 def farm_agent_detail(name):
     for space in farm_state()["spaces"]:
         for a in [space["lead_farmer"], *space["farmers"], *[x for f in space["farmers"] for x in f["animals"]],
@@ -853,7 +920,14 @@ def farm_agent_detail(name):
                 lines = [l.rstrip() for l in str(r.get("raw", "")).splitlines()]
                 while lines and not lines[-1]:
                     lines.pop()
-                return dict(a, screen="\n".join(lines[-45:]))
+                extra = {}
+                if a["kind"] == "leadfarmer":
+                    e = next((x for x in reg_all() if x.get("name") == name), {})
+                    extra["conversation"] = conversation((e.get("model") or {}).get("vendor") or a.get("vendor"),
+                                                         e.get("session_id"))
+                    unread = os.path.join(INBOX, f"{name}.unread")
+                    extra["unread_reports"] = sum(1 for l in open(unread) if l.strip()) if os.path.exists(unread) else 0
+                return dict(a, screen="\n".join(lines[-45:]), **extra)
     return {"name": name, "kind": "?", "status": "gone", "screen": "This agent is no longer on the farm."}
 
 
@@ -1074,6 +1148,34 @@ def enqueue(recipient, text, sender, final=False, space=None):
         return "outbox"
 
 
+def is_lead_farmer(agent):
+    try:
+        return any(e.get("name") == agent and e.get("role") == "chief-of-staff" for e in reg_all())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def cmd_inbox(a):
+    """Lead farmer: print unread reports (oldest first) and mark them read."""
+    me = os.environ.get("AGENT_NAME") or my_name()
+    unread_path = os.path.join(INBOX, f"{me}.unread")
+    msgs = [json.loads(l) for l in open(unread_path) if l.strip()] if os.path.exists(unread_path) else []
+    if not msgs:
+        print("No unread reports.")
+    for m in msgs:
+        print(f"--- {time.strftime('%H:%M', time.localtime(m['ts']))} {m['text']}\n")
+    if not a.peek and msgs:
+        with open(os.path.join(INBOX, f"{me}.read"), "a") as f:
+            for m in msgs:
+                f.write(json.dumps(m) + "\n")
+        os.remove(unread_path)
+    if not a.peek:
+        try:
+            os.remove(os.path.join(INBOX, f"{me}.nudged"))  # the next report may nudge again
+        except OSError:
+            pass
+
+
 def drain_outboxes():
     """Move messages that sandboxed agents left in their output dirs into the inbox."""
     if not os.path.isdir(SPACES):
@@ -1173,6 +1275,27 @@ def deliver_loop():
                         herdr("notification", "show", f"{len(msgs)} message(s) waiting in {where(live['pane_id'])}",
                               "--body", "Your unsent draft in that pane is holding them back. "
                                         "Send or clear it to receive them.", check=False)
+                    continue
+                if is_lead_farmer(agent):
+                    # keep the user's conversation clean: queue the reports as unread, send one short nudge
+                    with open(os.path.join(INBOX, f"{agent}.unread"), "a") as f:
+                        for m in msgs:
+                            f.write(json.dumps(m) + "\n")
+                    os.remove(path)
+                    for m in msgs:
+                        if m.get("final"):
+                            threading.Thread(target=finish_child, args=(m,), daemon=True).start()
+                    marker = os.path.join(INBOX, f"{agent}.nudged")
+                    if not os.path.exists(marker):
+                        unread = [json.loads(l) for l in open(os.path.join(INBOX, f"{agent}.unread")) if l.strip()]
+                        senders = sorted({m.get("from", "?") for m in unread})
+                        try:
+                            if submit(agent, f"\U0001F4EC {len(unread)} new report(s) from {', '.join(senders)}. "
+                                             "Read them with: agentctl inbox"):
+                                open(marker, "w").close()
+                                log(f"deliver {agent}: nudged ({len(unread)} unread)")
+                        except HerdrError as err:
+                            log(f"deliver {agent}: nudge failed: {err}")
                     continue
                 if len(msgs) == 1:
                     text = msgs[0]["text"]
@@ -1278,7 +1401,8 @@ def _tail_lines(path, nbytes=4_000_000):
         f.seek(0, 2)
         size = f.tell()
         f.seek(max(0, size - nbytes))
-        return f.read().decode("utf-8", "replace").splitlines()
+        lines = f.read().decode("utf-8", "replace").splitlines()
+    return lines[1:] if size > nbytes else lines  # the first line of a tail is usually cut off
 
 
 def context_usage(vendor, session_id):
@@ -1678,6 +1802,8 @@ def main():
     x.add_argument("--all", action="store_true"); x.set_defaults(f=cmd_decisions)
     x = s.add_parser("farm", help="serve the live farm view (http://127.0.0.1:8787)")
     x.add_argument("--port", type=int, default=8787); x.set_defaults(f=cmd_farm)
+    x = s.add_parser("inbox", help="(lead farmer) read unread reports and mark them read")
+    x.add_argument("--peek", action="store_true", help="show without marking read"); x.set_defaults(f=cmd_inbox)
     x = s.add_parser("needs-you", help="(CoS) alert the user that a decision is waiting")
     x.add_argument("text"); x.set_defaults(f=cmd_needs_you)
     a = p.parse_args()

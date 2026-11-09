@@ -91,6 +91,12 @@ The service runs `agentctl watch`. The watcher listens for the herdr `workspace_
 - Before a lead asks to push, merge or post, a fresh reviewer checks the change. The decision includes the path of the findings file.
 - If the watcher was down when a space was created, it starts the CoS when it reconnects.
 
+### A clean conversation with the lead farmer
+
+Reports from farmers do not go into the conversation that you have with the lead farmer. When reports wait, the watcher types only one short line into its pane: `📬 N new report(s) from <names>. Read them with: agentctl inbox`. The lead farmer reads them with `agentctl inbox`, and it tells you about them only when something changed for you. It gets a new nudge only after it reads the earlier reports.
+
+On the farm page, click the lead farmer to see "Your conversation". This view shows only your messages and its replies to them. It reads them from the transcript of the lead farmer and leaves out reports, watchdog notes, nudges and tool output. The full live screen is still available below the conversation.
+
 ### Decisions and alerts
 
 Leads send decisions to the CoS. The CoS ends each turn with a "Needs you" list:

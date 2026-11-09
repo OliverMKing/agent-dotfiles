@@ -147,6 +147,14 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 .box { background: rgba(0,0,0,.04); border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-size: 13px;
   white-space: pre-wrap; word-break: break-word; }
 :root[data-sky="night"] .box { background: rgba(255,255,255,.04); }
+.chat { display: grid; gap: 8px; max-height: 46vh; overflow: auto; padding: 4px 2px; }
+.msg { max-width: 88%; padding: 7px 10px; border-radius: 12px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+.msg.you { justify-self: end; background: #d3f9d8; color: #1b3a1f; border-bottom-right-radius: 3px; }
+.msg.them { justify-self: start; background: rgba(0,0,0,.05); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
+:root[data-sky="night"] .msg.you { background: #2b5a33; color: #e9f7ec; }
+:root[data-sky="night"] .msg.them { background: rgba(255,255,255,.05); }
+.msg small { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+details.screenbox summary { cursor: pointer; }
 pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 46vh; overflow: auto; }
 .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
 .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
@@ -324,7 +332,11 @@ async function loadDetail() {
   // keep the reader's place: skip identical refreshes and refreshes while text is selected
   const sel = window.getSelection();
   if (sel && sel.toString() && content.contains(sel.anchorNode)) return;
-  const sig = JSON.stringify([a.status, a.last_report, a.context_tokens, a.compactions, a.screen, a.last_report_text]);
+  const sig = JSON.stringify([a.status, a.last_report, a.context_tokens, a.compactions, a.screen, a.last_report_text,
+                              (a.conversation || []).length, a.unread_reports]);
+  const oldChat = content.querySelector(".chat");
+  const chatAtBottom = !oldChat || oldChat.scrollHeight - oldChat.scrollTop - oldChat.clientHeight < 8;
+  const chatTop = oldChat ? oldChat.scrollTop : 0;
   if (content.dataset.name === a.name && content.dataset.sig === sig) return;
   const oldPre = content.querySelector("pre.screen");
   const sameAgent = content.dataset.name === a.name;
@@ -345,9 +357,16 @@ async function loadDetail() {
       <div>Where</div><div>${esc(a.where || a.tab_label || "?")} <button class="btn" data-focus="${esc(a.name)}">Show me</button></div>
       <div>Folder</div><div>${esc(a.cwd || "")}</div>
     </div>
-    ${a.last_report_text ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
-    <div><div class="label">Live screen</div><div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></div>`;
+    ${a.kind === "leadfarmer" ? `<div><div class="label">Your conversation${a.unread_reports ? ` · ${a.unread_reports} unread report(s) from farmers` : ""}</div>
+        <div class="box chat">${(a.conversation || []).length ? a.conversation.map(m => `<div class="msg ${m.from === "you" ? "you" : "them"}">
+          <small>${m.from === "you" ? "you" : "lead farmer"}${m.ts ? " · " + new Date(m.ts).toLocaleTimeString() : ""}</small>${esc(m.text)}</div>`).join("")
+          : `<span class="label">No messages yet.</span>`}</div></div>` : ""}
+    ${a.last_report_text && a.kind !== "leadfarmer" ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
+    <${a.kind === "leadfarmer" ? "details class=\"screenbox\"" : "div"}>${a.kind === "leadfarmer" ? "<summary class=\"label\">Live screen (everything, including reports)</summary>" : "<div class=\"label\">Live screen</div>"}
+      <div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></${a.kind === "leadfarmer" ? "details" : "div"}>`;
   const pre = content.querySelector("pre.screen");
+  const chat = content.querySelector(".chat");
+  if (chat) chat.scrollTop = sameAgent && !chatAtBottom ? chatTop : chat.scrollHeight;
   if (sameAgent) {
     content.scrollTop = contentTop;
     pre.scrollTop = atBottom ? pre.scrollHeight : preTop;  // follow new output only if already at the bottom
