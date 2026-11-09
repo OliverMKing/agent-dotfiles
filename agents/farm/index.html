@@ -153,6 +153,10 @@ main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid;
 .msg.them { justify-self: start; background: rgba(0,0,0,.05); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
 :root[data-sky="night"] .msg.you { background: #2b5a33; color: #e9f7ec; }
 :root[data-sky="night"] .msg.them { background: rgba(255,255,255,.05); }
+.msg.pending { opacity: .65; }
+.msg.typing { font-style: italic; color: var(--muted); }
+.msg.typing .dots::after { content: "…"; animation: dots 1.2s steps(3, end) infinite; display: inline-block; width: 1.2em; overflow: hidden; vertical-align: bottom; }
+@keyframes dots { 0% { width: 0; } 100% { width: 1.2em; } }
 .msg small { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
 details.screenbox summary { cursor: pointer; }
 .composer { border-top: 1px solid var(--line); padding: 10px 16px 14px; display: grid; gap: 6px; }
@@ -340,12 +344,19 @@ async function openDetail(name) {
   if (name !== openName) { box.value = drafts[name] || ""; document.getElementById("say-err").hidden = true; }
   openName = name;
   const d = document.getElementById("drawer"); d.classList.add("open");
-  clearInterval(detailTimer); await loadDetail(); detailTimer = setInterval(loadDetail, 3000);
+  clearInterval(detailTimer); await loadDetail(); schedulePoll();
+}
+let lastDetail = null;
+function schedulePoll() {
+  clearTimeout(detailTimer);
+  if (!openName) return;
+  const fast = lastDetail && lastDetail.kind === "leadfarmer" && awaitingReply(lastDetail);
+  detailTimer = setTimeout(async () => { await loadDetail(); schedulePoll(); }, fast ? 1000 : 3000);
 }
 async function loadDetail() {
   if (!openName) return;
   const r = await fetch(`/api/agent/${encodeURIComponent(openName)}`, { cache: "no-store" });
-  const a = await r.json();
+  const a = await r.json(); lastDetail = a;
   document.getElementById("d-sprite").textContent = SPRITES[a.kind] || "🐾";
   document.getElementById("d-name").textContent = a.title || a.name;
   document.getElementById("d-kind").textContent = `${kindLabel(a)} · ${a.name}`;
@@ -354,7 +365,7 @@ async function loadDetail() {
   const sel = window.getSelection();
   if (sel && sel.toString() && content.contains(sel.anchorNode)) return;
   const sig = JSON.stringify([a.status, a.last_report, a.context_tokens, a.compactions, a.screen, a.last_report_text,
-                              (a.conversation || []).length, a.unread_reports]);
+                              (a.conversation || []).length, a.unread_reports, (pendingSent[a.name] || []).length]);
   const oldChat = content.querySelector(".chat");
   const chatAtBottom = !oldChat || oldChat.scrollHeight - oldChat.scrollTop - oldChat.clientHeight < 8;
   const chatTop = oldChat ? oldChat.scrollTop : 0;
@@ -379,9 +390,7 @@ async function loadDetail() {
       <div>Folder</div><div>${esc(a.cwd || "")}</div>
     </div>
     ${a.kind === "leadfarmer" ? `<div><div class="label">Your conversation${a.unread_reports ? ` · ${a.unread_reports} unread report(s) from farmers` : ""}</div>
-        <div class="box chat">${(a.conversation || []).length ? a.conversation.map(m => `<div class="msg ${m.from === "you" ? "you" : "them"}">
-          <small>${m.from === "you" ? "you" : "lead farmer"}${m.ts ? " · " + new Date(m.ts).toLocaleTimeString() : ""}</small>${esc(m.text)}</div>`).join("")
-          : `<span class="label">No messages yet.</span>`}</div></div>` : ""}
+        <div class="box chat">${chatHtml(a)}</div></div>` : ""}
     ${a.last_report_text && a.kind !== "leadfarmer" ? `<div><div class="label">Last report</div><div class="box">${esc(a.last_report_text)}</div></div>` : ""}
     <${a.kind === "leadfarmer" ? "details class=\"screenbox\"" : "div"}>${a.kind === "leadfarmer" ? "<summary class=\"label\">Live screen (everything, including reports)</summary>" : "<div class=\"label\">Live screen</div>"}
       <div class="box"><pre class="screen">${esc(a.screen || "(no screen)")}</pre></div></${a.kind === "leadfarmer" ? "details" : "div"}>`;
@@ -395,6 +404,23 @@ async function loadDetail() {
     pre.scrollTop = pre.scrollHeight;  // a new agent opens at its latest output, like a terminal
   }
 }
+const pendingSent = {};  // agent -> [{text, ts}] shown at once, until the transcript has them
+function chatHtml(a) {
+  const conv = a.conversation || [];
+  const seen = new Set(conv.filter(m => m.from === "you").map(m => m.text.trim()));
+  const pend = (pendingSent[a.name] || []).filter(p => !seen.has(p.text.trim()) && Date.now() - p.ts < 120000);
+  pendingSent[a.name] = pend;
+  const bubbles = conv.map(m => `<div class="msg ${m.from === "you" ? "you" : "them"}">
+      <small>${m.from === "you" ? "you" : "lead farmer"}${m.ts ? " · " + new Date(m.ts).toLocaleTimeString() : ""}</small>${esc(m.text)}</div>`)
+    .concat(pend.map(p => `<div class="msg you pending"><small>you · sending</small>${esc(p.text)}</div>`));
+  const lastFromYou = pend.length || (conv.length && conv[conv.length - 1].from === "you");
+  if (lastFromYou) bubbles.push(`<div class="msg them typing"><small>lead farmer</small>${a.status === "working" ? "thinking" : "reading your message"}<span class="dots"></span></div>`);
+  return bubbles.length ? bubbles.join("") : `<span class="label">No messages yet. Say hello below.</span>`;
+}
+function awaitingReply(a) {
+  const conv = a.conversation || [];
+  return (pendingSent[a.name] || []).length > 0 || (conv.length && conv[conv.length - 1].from === "you");
+}
 async function say(agent, text) {
   const r = await fetch(`/api/say/${encodeURIComponent(agent)}`, { method: "POST",
     headers: { "X-Farm-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
@@ -405,11 +431,18 @@ document.getElementById("composer").addEventListener("submit", async e => {
   e.preventDefault();
   const box = document.getElementById("say"), err = document.getElementById("say-err");
   const text = box.value.trim(); if (!text || !openName) return;
-  err.hidden = true; box.disabled = true;
-  const res = await say(openName, text);
-  box.disabled = false;
-  if (res.ok) { box.value = ""; delete drafts[openName]; document.getElementById("d-content").dataset.sig = ""; setTimeout(loadDetail, 1500); }
-  else { err.textContent = `Not sent: ${res.reason}`; err.hidden = false; }
+  err.hidden = true;
+  const target = openName, item = { text, ts: Date.now() };
+  // show it at once, like a chat app; take it back only if sending fails
+  (pendingSent[target] = pendingSent[target] || []).push(item);
+  box.value = ""; delete drafts[target];
+  document.getElementById("d-content").dataset.sig = ""; if (lastDetail && lastDetail.name === target) {
+    const c = document.querySelector("#d-content .chat"); if (c) { c.innerHTML = chatHtml(lastDetail); c.scrollTop = c.scrollHeight; } }
+  const res = await say(target, text);
+  if (res.ok) { document.getElementById("d-content").dataset.sig = ""; loadDetail(); setTimeout(loadDetail, 1500); }
+  else { pendingSent[target] = (pendingSent[target] || []).filter(p => p !== item);
+    if (openName === target && !box.value) box.value = text;  // give the text back so nothing is lost
+    err.textContent = `Not sent: ${res.reason}`; err.hidden = false; document.getElementById("d-content").dataset.sig = ""; loadDetail(); }
   box.focus();
 });
 document.getElementById("say").addEventListener("keydown", e => {
@@ -424,7 +457,7 @@ function goTo(target) {
 }
 function closeDetail() {
   stashDraft();
-  openName = null; clearInterval(detailTimer); document.getElementById("drawer").classList.remove("open");
+  openName = null; clearTimeout(detailTimer); document.getElementById("drawer").classList.remove("open");
   const c = document.getElementById("d-content"); c.dataset.name = ""; c.dataset.sig = "";
 }
 document.addEventListener("click", e => {

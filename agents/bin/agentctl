@@ -857,6 +857,11 @@ def _human_text(t):
     return t[:cut].strip() or None
 
 
+def _reply_text(t):
+    t = re.sub(r"\s*Nothing needs you\.?\s*$", "", (t or "").strip())
+    return t.strip()
+
+
 def conversation(vendor, session_id, limit=40):
     """Only the user's messages to this agent and its replies to them (no reports, notes, or tools)."""
     import glob
@@ -882,8 +887,8 @@ def conversation(vendor, session_id, limit=40):
                             out.append({"from": "you", "text": t, "ts": d.get("timestamp")})
                 elif d.get("type") == "assistant" and d["message"].get("stop_reason") == "end_turn":
                     t = "\n".join(x.get("text", "") for x in d["message"]["content"] if x.get("type") == "text")
-                    if human_turn and t.strip():
-                        out.append({"from": "lead farmer", "text": t.strip(), "ts": d.get("timestamp")})
+                    if human_turn and _reply_text(t):
+                        out.append({"from": "lead farmer", "text": _reply_text(t), "ts": d.get("timestamp")})
                     human_turn = False
         else:
             files = glob.glob(os.path.join(HOME, ".codex", "sessions", "*", "*", "*", f"*{session_id}*.jsonl"))
@@ -903,16 +908,27 @@ def conversation(vendor, session_id, limit=40):
                     if h:
                         out.append({"from": "you", "text": h, "ts": d.get("timestamp")})
                 elif p.get("role") == "assistant" and p.get("phase") == "final_answer":
-                    if human_turn and t.strip():
-                        out.append({"from": "lead farmer", "text": t.strip(), "ts": d.get("timestamp")})
+                    if human_turn and _reply_text(t):
+                        out.append({"from": "lead farmer", "text": _reply_text(t), "ts": d.get("timestamp")})
                     human_turn = False
     except (OSError, ValueError, KeyError, IndexError):
         pass
     return out[-limit:]
 
 
+_FARM_CACHE = {"t": 0, "data": None}
+_FARM_LOCK = threading.Lock()
+
+
+def cached_farm_state(max_age=2.0):
+    with _FARM_LOCK:
+        if not _FARM_CACHE["data"] or time.time() - _FARM_CACHE["t"] > max_age:
+            _FARM_CACHE["data"], _FARM_CACHE["t"] = farm_state(), time.time()
+        return _FARM_CACHE["data"]
+
+
 def farm_agent_detail(name):
-    for space in farm_state()["spaces"]:
+    for space in cached_farm_state(3.0)["spaces"]:
         for a in [space["lead_farmer"], *space["farmers"], *[x for f in space["farmers"] for x in f["animals"]],
                   *space["loose"]]:
             if a and a["name"] == name:
@@ -921,6 +937,9 @@ def farm_agent_detail(name):
                 while lines and not lines[-1]:
                     lines.pop()
                 extra = {}
+                live = agent_by_name(name)
+                if live:
+                    extra["status"] = live["agent_status"]
                 if a["kind"] == "leadfarmer":
                     e = next((x for x in reg_all() if x.get("name") == name), {})
                     extra["conversation"] = conversation((e.get("model") or {}).get("vendor") or a.get("vendor"),
@@ -990,12 +1009,9 @@ def cmd_farm(a):
                         .replace("__FARM_VERSION__", str(int(os.path.getmtime(page))))
                     self._send(200, html.encode(), "text/html; charset=utf-8")
                 elif self.path == "/api/farm":
-                    with lock:
-                        if time.time() - cache["t"] > 2:
-                            st = farm_state()
-                            st["page_version"] = str(int(os.path.getmtime(page)))  # open pages reload on change
-                            cache["body"], cache["t"] = json.dumps(st).encode(), time.time()
-                        body = cache["body"]
+                    st = dict(cached_farm_state(2.0))
+                    st["page_version"] = str(int(os.path.getmtime(page)))  # open pages reload on change
+                    body = json.dumps(st).encode()
                     self._send(200, body, "application/json")
                 elif self.path == "/api/quota":
                     with lock:
