@@ -213,6 +213,7 @@ def read_only_settings(outdir, cwd):
     """Write .build/settings-<agent>.json: base deny rules + no writes to the repo or outside."""
     cfg = json.load(open(SETTINGS))
     perms = cfg.setdefault("permissions", {})
+    perms.setdefault("deny", []).extend(setup_denies())
     for d in dict.fromkeys([git_root(cwd), cwd] if cwd else []):
         perms.setdefault("deny", []).append(f"Edit(/{os.path.realpath(d)}/**)")  # //abs/path
     perms["blockWritesOutsideWorkingDirectories"] = True
@@ -223,11 +224,32 @@ def read_only_settings(outdir, cwd):
     return path
 
 
+SETUP_REPO = os.path.realpath(os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", ".."))
+# the setup as agents see it through ~/agents symlinks (spaces/ and specialties/ stay writable)
+SETUP_PATHS = [SETUP_REPO] + [os.path.join(AGENTS, x) for x in
+                              ("bin", "roles", "farm", "models.json", "settings.json", "context.md")]
+
+
+def setup_denies():
+    return [f"Edit(/{p}/**)" if not p.endswith((".json", ".md")) else f"Edit(/{p})" for p in SETUP_PATHS]
+
+
+def guarded_settings():
+    """Base settings plus: no agent may edit the agent setup itself (this repo: agentctl, roles, ...)."""
+    cfg = json.load(open(SETTINGS))
+    cfg.setdefault("permissions", {}).setdefault("deny", []).extend(setup_denies())
+    os.makedirs(BUILD, exist_ok=True)
+    path = os.path.join(BUILD, "settings-guarded.json")
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=1)
+    return path
+
+
 def agent_args(role, choice, cwd=None, outdir=None, specialty=None):
     read_only = role in READ_ONLY_ROLES
     if choice["vendor"] == "claude":
         a = ["--model", choice["model"], "--effort", choice["effort"], "--permission-mode", "auto",
-             "--settings", SETTINGS, "--append-system-prompt-file", role_file(role, specialty)]
+             "--settings", guarded_settings(), "--append-system-prompt-file", role_file(role, specialty)]
         if read_only:
             # Hard confinement: per-agent settings deny edits to the repo (also covers Bash
             # redirects / tee / file commands) and block tool writes outside the working dirs,
@@ -365,7 +387,7 @@ def start_cos(wid, wait_trust_ms=900000):
     if not free:
         log(f"{wid}: no free shell pane, not starting CoS")
         return None
-    pane = sorted(free, key=lambda p: (p["tab_id"], int(p["pane_id"].split(":p")[-1])))[0]
+    pane = free[0]  # herdr's own order; pane IDs are opaque (w1:p9, w1:pD, ...), never parse them
     sdir = space_dir(wid)
     with open(os.path.join(sdir, "space.json"), "w") as f:
         json.dump({"workspace_id": wid, "label": ws.get("label"), "cwd": pane.get("cwd"),
@@ -433,7 +455,8 @@ def place_pane(wid, role, slug, title, parent, cwd, env):
     if role != "lead" and parent_slug and my_tab:
         tab_panes = [p for p in herdr("pane", "list", "--workspace", wid)["panes"] if p["tab_id"] == my_tab]
         if len(tab_panes) < PANES_PER_TAB:
-            last = sorted(tab_panes, key=lambda p: int(p["pane_id"].split(":p")[-1]))[-1]
+            # Herdr pane IDs are opaque handles, not decimal sequence numbers.
+            last = tab_panes[-1]
             direction = "right" if len(tab_panes) % 2 == 1 else "down"
             pane = herdr("pane", "split", last["pane_id"], "--direction", direction, "--cwd", cwd,
                          "--no-focus", *env_args)["pane"]["pane_id"]

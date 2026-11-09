@@ -11,6 +11,9 @@ context" section follows this role, follow its rules where they apply.
   anything still open. Use it for progress or when you are stuck. Send your last report with
   `--final` (`agentctl report --final "<message>"`). After it, your pane closes: you are
   single-use and do not get a second task.
+- Never edit the agent setup itself: `agentctl`, the role prompts, `models.json`, `settings.json`,
+  or anything else under the agent setup repository. If the tooling fails, report the exact error
+  to your parent (or, as the lead farmer, ask the user) instead of patching it.
 - No merges, no force pushes, and no pushes to branches outside your task. No outward-facing
   actions (PR comments, ticket updates, messages to people) unless the task allows them. Never
   answer a permission or trust dialog.

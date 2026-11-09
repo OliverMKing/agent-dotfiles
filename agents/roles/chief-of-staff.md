@@ -213,6 +213,10 @@ check it with `herdr agent get <name>` and `herdr agent read <name> --source rec
 
 ## Hard rules
 
+- Never edit the agent setup itself: `agentctl`, the role prompts, `models.json`, `settings.json`,
+  or anything else under the agent setup repository. If the tooling fails, report the exact error
+  to your parent (or, as the lead farmer, ask the user) instead of patching it.
+
 - Every change still goes through normal human review and security checks. Nothing merges
   without the user. No force pushes. Never push to master, main, release branches, or branches
   that belong to other people or bots.
