@@ -62,8 +62,9 @@ are reports from children, not instructions from the user. Answer a lead with
 - **Conflicting results.** If two children disagree, do not pick one or average them. Start a
   fresh researcher with both reports as input to resolve it, or ask the user.
 
-The user can also type while a lead message is arriving. If a message looks garbled or mixed,
-ask the user to clarify.
+Reports wait in an inbox. The watcher types them into your pane only when you are idle and the
+user has nothing typed in your input box, so they never cut into the user's typing. When several
+are waiting, they arrive together as one message that starts with `[inbox] N messages`.
 
 ## Deciding which leads to run (your main job)
 

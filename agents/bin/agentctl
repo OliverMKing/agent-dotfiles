@@ -35,6 +35,7 @@ SETTINGS = os.path.join(AGENTS, "settings.json")
 MEMDIR = os.path.join(HOME, ".claude", "projects", HOME.replace("/", "-"), "memory")
 CONTEXT = os.path.join(AGENTS, "context.md")  # personal, not in git: who the user is, repo rules
 BUILD = os.path.join(AGENTS, ".build")
+INBOX = os.path.join(AGENTS, "inbox")  # one JSONL queue per recipient agent
 SOCK = os.environ.get("HERDR_SOCKET_PATH", os.path.join(HOME, ".config", "herdr", "herdr.sock"))
 SELF = os.path.abspath(__file__)
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -309,7 +310,7 @@ def start_cos(wid, wait_trust_ms=900000):
         if not wait_idle(name, wait_trust_ms):
             log(f"{name}: never became ready; leaving it")
             return None
-    herdr("agent", "prompt", name, COS_FIRST.format(
+    submit(name, COS_FIRST.format(
         wid=wid, label=ws.get("label"), cwd=pane.get("cwd"), name=name, sdir=sdir,
         model=f"{choice['vendor']} {choice['model']} ({choice['effort']} effort)"))
     log(f"{name}: ready")
@@ -414,7 +415,7 @@ def cmd_spawn(a):
             f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
         print(json.dumps(out, indent=1))
         sys.exit(3)
-    herdr("agent", "prompt", name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
+    submit(name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
     reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
                model=choice, outdir=outdir, started=time.time(), last_report=0, state="running")
     out["status"] = "started"
@@ -427,7 +428,7 @@ def cmd_send_pending(a):
     path = os.path.join(space_dir(wid), f"pending-task-{a.name}.md")
     if not wait_idle(a.name, 5000):
         raise SystemExit(f"{a.name} is not idle yet (still blocked?)")
-    herdr("agent", "prompt", a.name, open(path).read())
+    submit(a.name, open(path).read())
     os.remove(path)
     reg_update(wid, a.name, state="running")
     print(json.dumps({"name": a.name, "status": "task_sent"}))
@@ -450,26 +451,19 @@ def cmd_report(a):
     if not parent:
         raise SystemExit("no parent: not a spawned or adopted agent (AGENT_PARENT unset, pane not registered)")
     text = a.text if a.text != "-" else sys.stdin.read()
-    for attempt in range(20):
-        try:
-            herdr("agent", "prompt", parent, f"[from {me}]{' [final]' if a.final else ''} {text}")
-            space = os.environ.get("AGENT_SPACE")
-            if space and me != "?":
-                entry = reg_update(space, me, last_report=time.time())
-                if a.final and entry.get("role") in ("worker", "reviewer", "researcher"):
-                    # single-use child: mark done and close its pane once this command has returned
-                    reg_update(space, me, state="done", ended=time.time())
-                    if entry.get("pane"):
-                        subprocess.Popen(["sh", "-c", f"sleep 8; herdr pane close {entry['pane']}"],
-                                         start_new_session=True, stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print(json.dumps({"delivered_to": parent}))
-            return
-        except HerdrError as e:
-            if e.code != "agent_blocked":
-                raise SystemExit(str(e))
-            time.sleep(15)  # parent is at a dialog the user must answer; retry for ~5 min
-    raise SystemExit(f"{parent} stayed blocked; report not delivered")
+    enqueue(parent, f"[from {me}]{' [final]' if a.final else ''} {text}", me)
+    space = os.environ.get("AGENT_SPACE")
+    if space and me != "?":
+        entry = reg_update(space, me, last_report=time.time())
+        if a.final and entry.get("role") in ("worker", "reviewer", "researcher"):
+            # single-use child: mark done and close its pane once this command has returned
+            reg_update(space, me, state="done", ended=time.time())
+            if entry.get("pane"):
+                subprocess.Popen(["sh", "-c", f"sleep 8; herdr pane close {entry['pane']}"],
+                                 start_new_session=True, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(json.dumps({"queued_for": parent,
+                      "note": "delivered when the parent is idle and its input box is empty"}))
 
 
 def cmd_needs_you(a):
@@ -572,6 +566,155 @@ def cmd_start_cos(a):
 
 # ------------------------------------------------------------------ watcher
 
+# ------------------------------------------------------------------ input-box draft detection
+
+SGR = re.compile(r"\x1b\[([0-9;]*)m")
+CSI_OTHER = re.compile(r"\x1b\[[0-9;?]*[A-Za-ln-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+PROMPT_CHARS = ("\u276f", "\u203a")  # Claude "❯", Codex "›"
+
+
+def _typed_text(ansi_line, prompt_char):
+    """Text after the prompt char that is not dim/faint (placeholders and suggestions are dim)."""
+    line = CSI_OTHER.sub("", ansi_line)
+    i = line.find(prompt_char)
+    if i < 0:
+        return None
+    dim, out, pos = False, [], 0
+    # replay SGR state up to the prompt char so we know the style at that point
+    for m in SGR.finditer(line):
+        if m.start() >= i:
+            break
+        dim = _apply_sgr(m.group(1), dim)
+    rest = line[i + 1:]
+    for m in SGR.finditer(rest):
+        if not dim:
+            out.append(rest[pos:m.start()])
+        dim = _apply_sgr(m.group(1), dim)
+        pos = m.end()
+    if not dim:
+        out.append(rest[pos:])
+    return "".join(out).replace("\u00a0", " ").strip()
+
+
+def _apply_sgr(params, dim):
+    codes = [c for c in params.split(";") if c != ""] or ["0"]
+    k = 0
+    while k < len(codes):
+        c = codes[k]
+        if c == "0" or c == "22":
+            dim = False
+        elif c == "2":
+            dim = True
+        elif c in ("38", "48") and k + 1 < len(codes):  # skip color arguments
+            k += 4 if codes[k + 1] == "2" else 2
+        k += 1
+    return dim
+
+
+def has_draft(agent):
+    """True if the user has typed something into this agent's input box (do not type over it)."""
+    r = herdr("agent", "read", agent, "--source", "visible", "--format", "ansi", check=False)
+    raw = str(r.get("raw", ""))
+    for line in reversed(raw.splitlines()):
+        plain = SGR.sub("", CSI_OTHER.sub("", line))
+        for ch in PROMPT_CHARS:
+            if ch in plain:
+                text = _typed_text(line, ch)
+                return bool(text)
+    return False  # no input box visible (e.g. a dialog): status checks handle that
+
+
+# ------------------------------------------------------------------ inbox + safe delivery
+
+DRAFT_NAG_AFTER = 600  # s: tell the user if a draft in a pane holds messages back this long
+
+
+def enqueue(recipient, text, sender):
+    """Queue a message for an agent. The watcher types it in only when that is safe."""
+    os.makedirs(INBOX, exist_ok=True)
+    line = json.dumps({"ts": time.time(), "from": sender, "text": text}) + "\n"
+    with open(os.path.join(INBOX, f"{recipient}.jsonl"), "a") as f:
+        f.write(line)
+
+
+def submit(agent, text):
+    """Prompt an agent and make sure the text was actually submitted (a multi-line paste can leave
+    it sitting in the input box). Returns True when the agent took it."""
+    herdr("agent", "prompt", agent, text)
+    for _ in range(10):
+        time.sleep(1)
+        st = (herdr("agent", "get", agent, check=False).get("agent") or {}).get("agent_status")
+        if st in ("working", "blocked"):
+            return True
+        if not has_draft(agent):
+            return True  # idle with an empty box: it was taken (a very fast turn)
+    if has_draft(agent):
+        herdr("agent", "send-keys", agent, "enter", check=False)  # the Enter got lost: press it
+        time.sleep(2)
+        return not has_draft(agent)
+    return True
+
+
+def deliver_loop():
+    """Deliver queued messages when the recipient is idle and its input box is empty."""
+    nagged = {}
+    while True:
+        try:
+            for fn in sorted(os.listdir(INBOX)) if os.path.isdir(INBOX) else []:
+                if not fn.endswith(".jsonl"):
+                    continue
+                agent, path = fn[:-6], os.path.join(INBOX, fn)
+                try:
+                    msgs = [json.loads(l) for l in open(path) if l.strip()]
+                except (OSError, ValueError):
+                    continue
+                if not msgs:
+                    continue
+                live = agent_by_name(agent)
+                oldest = time.time() - msgs[0]["ts"]
+                if not live:
+                    if oldest > DRAFT_NAG_AFTER and nagged.get(agent) != len(msgs):
+                        nagged[agent] = len(msgs)
+                        herdr("notification", "show", f"{len(msgs)} undelivered message(s) for {agent}",
+                              "--body", f"{agent} is not running. Messages wait in {path}.",
+                              "--sound", "request", check=False)
+                    continue
+                if live["agent_status"] not in ("idle", "done"):
+                    continue
+                if has_draft(agent):
+                    if oldest > DRAFT_NAG_AFTER and nagged.get(agent) != len(msgs):
+                        nagged[agent] = len(msgs)
+                        herdr("notification", "show", f"{agent}: {len(msgs)} message(s) waiting",
+                              "--body", "Your unsent draft in that pane is holding them back. "
+                                        "Send or clear it to receive them.", check=False)
+                    continue
+                if len(msgs) == 1:
+                    text = msgs[0]["text"]
+                else:
+                    text = f"[inbox] {len(msgs)} messages, oldest first:\n\n" + \
+                           "\n\n".join(m["text"] for m in msgs)
+                # take the batch atomically: new messages that arrive meanwhile stay queued
+                tmp = path + ".sending"
+                os.replace(path, tmp)
+                late = []
+                try:
+                    if not submit(agent, text):
+                        raise HerdrError("not_submitted", "text stayed in the input box")
+                except HerdrError as err:
+                    log(f"deliver {agent}: {err}; requeued")
+                    late = msgs
+                with open(path, "a") as f:
+                    for m in late + [json.loads(l) for l in open(tmp) if l.strip()][len(msgs):]:
+                        f.write(json.dumps(m) + "\n")
+                os.remove(tmp)
+                if not late:
+                    nagged.pop(agent, None)
+                    log(f"deliver {agent}: {len(msgs)} message(s)")
+        except Exception as err:  # noqa: BLE001
+            log("deliver:", err)
+        time.sleep(2)
+
+
 # ------------------------------------------------------------------ child registry + watchdog
 
 def reg_path(wid, agent):
@@ -612,15 +755,10 @@ def reg_all():
 
 
 def tell(parent, text, user_title=None):
-    """Type a [watch] note into the parent's pane; if that fails, alert the user instead."""
-    for _ in range(20):
-        try:
-            herdr("agent", "prompt", parent, f"[watch] {text}")
-            return True
-        except HerdrError as e:
-            if e.code != "agent_blocked":
-                break
-            time.sleep(15)
+    """Queue a [watch] note for the parent; if the parent is gone, alert the user instead."""
+    if parent and agent_by_name(parent):
+        enqueue(parent, f"[watch] {text}", "watchdog")
+        return True
     herdr("notification", "show", user_title or "Agent watchdog", "--body", text[:300],
           "--sound", "request", check=False)
     return False
@@ -804,6 +942,7 @@ def on_pane_gone(pane_id, exited):
 
 def cmd_watch(a):
     threading.Thread(target=watchdog_loop, daemon=True).start()
+    threading.Thread(target=deliver_loop, daemon=True).start()
     seen = set()
     while True:
         try:
