@@ -857,12 +857,44 @@ def farm_agent_detail(name):
     return {"name": name, "kind": "?", "status": "gone", "screen": "This agent is no longer on the farm."}
 
 
+PROXY_URL = os.environ.get("AGENTCTL_PROXY_URL", "http://localhost:4141")
+
+
+def copilot_quota():
+    """Premium-credit quota from the copilot-api proxy's /usage (only the quota numbers)."""
+    import urllib.request
+    from datetime import datetime, timezone
+    try:
+        with urllib.request.urlopen(f"{PROXY_URL}/usage", timeout=8) as r:
+            d = json.load(r)
+    except Exception as err:  # noqa: BLE001
+        return {"available": False, "error": str(err)[:200]}
+    q = (d.get("quota_snapshots") or {}).get("premium_interactions") or {}
+    if not q or q.get("unlimited"):
+        return {"available": bool(q), "unlimited": bool(q.get("unlimited"))}
+    ent = q.get("entitlement") or 0
+    used = q.get("credits_used", ent - (q.get("remaining") or 0))
+    reset = d.get("quota_reset_date_utc") or d.get("quota_reset_date")
+    pace = None
+    try:
+        end = datetime.fromisoformat(reset.replace("Z", "+00:00"))
+        start = end.replace(month=end.month - 1) if end.month > 1 else end.replace(year=end.year - 1, month=12)
+        now = datetime.now(timezone.utc)
+        pace = max(0.0, min(1.0, (now - start) / (end - start)))
+    except Exception:  # noqa: BLE001
+        pass
+    return {"available": True, "unlimited": False, "used": used, "entitlement": ent,
+            "remaining": q.get("remaining"), "percent_used": round(100 * used / ent, 1) if ent else None,
+            "reset": reset, "month_elapsed": round(100 * pace, 1) if pace is not None else None,
+            "overage_permitted": q.get("overage_permitted"), "overage_count": q.get("overage_count", 0)}
+
+
 def cmd_farm(a):
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import unquote
     page = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "farm", "index.html")
     token = os.urandom(16).hex()  # embedded in the page; other sites cannot read it, so cannot POST
-    cache = {"t": 0, "body": b""}
+    cache = {"t": 0, "body": b"", "qt": 0, "quota": b""}
     lock = threading.Lock()
 
     class H(BaseHTTPRequestHandler):
@@ -887,6 +919,12 @@ def cmd_farm(a):
                         if time.time() - cache["t"] > 2:
                             cache["body"], cache["t"] = json.dumps(farm_state()).encode(), time.time()
                         body = cache["body"]
+                    self._send(200, body, "application/json")
+                elif self.path == "/api/quota":
+                    with lock:
+                        if time.time() - cache["qt"] > 60:
+                            cache["quota"], cache["qt"] = json.dumps(copilot_quota()).encode(), time.time()
+                        body = cache["quota"]
                     self._send(200, body, "application/json")
                 elif self.path.startswith("/api/agent/"):
                     name = unquote(self.path[len("/api/agent/"):])

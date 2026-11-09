@@ -42,6 +42,19 @@ button.chip:hover b { color: #fff; }
 main { max-width: 1200px; margin: 0 auto; padding: 8px 16px 48px; display: grid; gap: 22px; }
 .empty { background: var(--card); border-radius: 16px; padding: 32px; text-align: center; color: var(--muted); }
 
+/* copilot quota */
+.quota { max-width: 1200px; margin: 0 auto; padding: 0 16px 8px; }
+.quota-card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 8px 14px;
+  display: grid; grid-template-columns: auto 1fr auto; gap: 4px 12px; align-items: center; font-size: 13px; }
+.quota-card .what { font-weight: 800; }
+.qbar { position: relative; height: 12px; border-radius: 6px; background: rgba(0,0,0,.08); overflow: visible; }
+:root[data-sky="night"] .qbar { background: rgba(255,255,255,.1); }
+.qbar i { display: block; height: 100%; border-radius: 6px; background: var(--working); }
+.qbar.warn i { background: #f59f00; } .qbar.over i { background: var(--blocked); }
+.qbar .pace { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--ink); opacity: .7; }
+.quota-card .note { grid-column: 1 / -1; color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) { .quota-card { grid-template-columns: 1fr; } }
+
 /* needs-you board */
 .needs { background: #fff4e6; color: #2f2a22; border-bottom: 3px solid var(--accent); padding: 10px 14px; display: grid; gap: 8px; }
 .needs h3 { margin: 0; font-size: 14px; color: var(--accent); }
@@ -147,6 +160,7 @@ pre.screen { margin: 0; font: 11.5px/1.35 ui-monospace, SFMono-Regular, Menlo, m
   <div class="chips" id="chips"></div>
   <button class="btn quiet" id="notify" type="button">🔔 Notify me</button>
 </header>
+<div class="quota" id="quota"></div>
 <div class="updated" id="updated">Loading the farm…</div>
 <main id="farm"></main>
 
@@ -345,6 +359,27 @@ document.getElementById("notify").addEventListener("click", async () => {
 paintNotifyButton();
 document.getElementById("d-close").addEventListener("click", closeDetail);
 document.addEventListener("keydown", e => { if (e.key === "Escape") document.getElementById("d-close").click(); });
+async function refreshQuota() {
+  const el = document.getElementById("quota");
+  try {
+    const q = await (await fetch("/api/quota", { cache: "no-store" })).json();
+    if (!q.available) { el.innerHTML = ""; return; }
+    if (q.unlimited) { el.innerHTML = `<div class="quota-card"><span class="what">Copilot</span><span>Premium requests are unlimited on this plan.</span><span></span></div>`; return; }
+    const pct = q.percent_used ?? 0, pace = q.month_elapsed;
+    const ahead = pace != null && pct > pace + 5;
+    const cls = pct >= 100 ? "over" : (pct >= 80 || ahead) ? "warn" : "";
+    const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 2 : 0) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
+    const reset = q.reset ? new Date(q.reset).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" }) : "?";
+    const paceText = pace == null ? "" : ahead ? ` · ahead of pace (${pace}% of the month has passed)` : ` · on pace (${pace}% of the month has passed)`;
+    el.innerHTML = `<div class="quota-card" title="Copilot premium credits for this billing month">
+      <span class="what">Copilot quota</span>
+      <span class="qbar ${cls}"><i style="width:${Math.min(100, pct)}%"></i>${pace != null ? `<span class="pace" style="left:${pace}%" title="how much of the month has passed"></span>` : ""}</span>
+      <span><b>${pct}%</b> used · ${fmt(q.used)} of ${fmt(q.entitlement)} credits</span>
+      <span class="note">Resets ${esc(reset)}${paceText}${q.overage_count ? ` · ${fmt(q.overage_count)} overage credits used` : ""}${pct >= 100 ? (q.overage_permitted ? " · now in overage (billed)" : " · quota exhausted") : ""}</span>
+    </div>`;
+  } catch (e) { el.innerHTML = ""; }
+}
+refreshQuota(); setInterval(refreshQuota, 30000);
 sky(); setInterval(sky, 60000);
 refresh(); setInterval(refresh, 3000);
 </script>
