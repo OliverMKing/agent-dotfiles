@@ -320,7 +320,8 @@ def start_cos(wid, wait_trust_ms=900000):
 
 CHILD_HEADER = """You are {name} (role: {role}) in herdr space {wid}. Your parent agent is {parent}.
 Report to your parent ONLY with: ~/agents/bin/agentctl report "<message>"
-(milestones, when you need a decision, when blocked, when done).{extra} Your task:
+(milestones, when you need a decision, when blocked, when done). A worker, reviewer or
+researcher sends its LAST report with --final; its pane then closes (children are single-use).{extra} Your task:
 
 {task}"""
 
@@ -379,7 +380,8 @@ def cmd_spawn(a):
     if not NAME_RE.match(name):
         raise SystemExit(f"invalid agent name {name}")
     if agent_by_name(name):
-        raise SystemExit(f"agent {name} already exists; pick another slug or message it")
+        raise SystemExit(f"agent {name} already exists. Children are single-use: pick a new slug "
+                         "(do not send a second task to a finished child)")
     task = a.task if a.task != "-" else sys.stdin.read()
     cwd = os.path.abspath(os.path.expanduser(a.cwd or os.getcwd()))
     outdir = None
@@ -450,9 +452,17 @@ def cmd_report(a):
     text = a.text if a.text != "-" else sys.stdin.read()
     for attempt in range(20):
         try:
-            herdr("agent", "prompt", parent, f"[from {me}] {text}")
-            if os.environ.get("AGENT_SPACE") and me != "?":
-                reg_update(os.environ["AGENT_SPACE"], me, last_report=time.time())
+            herdr("agent", "prompt", parent, f"[from {me}]{' [final]' if a.final else ''} {text}")
+            space = os.environ.get("AGENT_SPACE")
+            if space and me != "?":
+                entry = reg_update(space, me, last_report=time.time())
+                if a.final and entry.get("role") in ("worker", "reviewer", "researcher"):
+                    # single-use child: mark done and close its pane once this command has returned
+                    reg_update(space, me, state="done", ended=time.time())
+                    if entry.get("pane"):
+                        subprocess.Popen(["sh", "-c", f"sleep 8; herdr pane close {entry['pane']}"],
+                                         start_new_session=True, stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print(json.dumps({"delivered_to": parent}))
             return
         except HerdrError as e:
@@ -805,6 +815,8 @@ def cmd_watch(a):
             s.sendall((json.dumps(req) + "\n").encode())
             f = s.makefile()
             log("subscribed:", f.readline().strip()[:120])
+            # backfill: spaces created while the watcher was down (still one plain shell, no agents)
+            threading.Thread(target=backfill_cos, args=(seen,), daemon=True).start()
             for line in f:
                 try:
                     ev = json.loads(line)
@@ -834,6 +846,23 @@ def cmd_watch(a):
         time.sleep(3)
 
 
+def backfill_cos(seen):
+    try:
+        agents = herdr("agent", "list")["agents"]
+        panes = herdr("pane", "list")["panes"]
+        for w in herdr("workspace", "list")["workspaces"]:
+            wid = w["workspace_id"]
+            mine = [p for p in panes if p["workspace_id"] == wid]
+            fresh = w.get("tab_count") == 1 and len(mine) == 1 and not mine[0].get("agent")
+            has_cos = any(a.get("name") == f"cos-{wid.lower()}" for a in agents)
+            if fresh and not has_cos and wid not in seen:
+                seen.add(wid)
+                log(f"{wid}: backfill (created while the watcher was down)")
+                threading.Thread(target=safe_start_cos, args=(wid,), daemon=True).start()
+    except Exception as err:  # noqa: BLE001
+        log("backfill:", err)
+
+
 def safe_start_cos(wid):
     time.sleep(1.5)  # let the new shell reach its prompt
     try:
@@ -849,7 +878,7 @@ def main():
     x = s.add_parser("start-cos"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_start_cos)
     x = s.add_parser("spawn")
     x.add_argument("role", choices=["lead", "worker", "reviewer", "researcher"])
-    x.add_argument("slug", help="short id for the agent name, e.g. dd-kv-cert")
+    x.add_argument("slug", help="short id for the agent name, e.g. auth-refresh")
     x.add_argument("--title", required=True,
                    help="tab/pane label saying what it does, 2+ words, <=40 chars, "
                         "e.g. 'review auth token refresh PR'")
@@ -862,6 +891,8 @@ def main():
     x = s.add_parser("send-pending"); x.add_argument("name"); x.set_defaults(f=cmd_send_pending)
     x = s.add_parser("report"); x.add_argument("text")
     x.add_argument("--as", dest="as_name", help="report as this registered agent (adopted agents)")
+    x.add_argument("--final", action="store_true",
+                   help="last report: a worker/reviewer/researcher is marked done and its pane closes")
     x.set_defaults(f=cmd_report)
     x = s.add_parser("ls"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_ls)
     x = s.add_parser("adopt", help="make a hand-started claude/codex pane a lead under the space's CoS")

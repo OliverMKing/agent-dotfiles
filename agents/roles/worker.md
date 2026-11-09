@@ -8,7 +8,9 @@ role, follow its rules where they apply.
 - Verify your result (build, test, or query output) before you report it.
 - Write long output to a file and report the file path.
 - Report only with `~/agents/bin/agentctl report "<message>"`: what you did, the evidence, and
-  anything still open. Report when you finish or get stuck. Then stop.
+  anything still open. Use it for progress or when you are stuck. Send your last report with
+  `--final` (`agentctl report --final "<message>"`). After it, your pane closes: you are
+  single-use and do not get a second task.
 - No merges, no force pushes, and no pushes to branches outside your task. No outward-facing
   actions (PR comments, ticket updates, messages to people) unless the task allows them. Never
   answer a permission or trust dialog.

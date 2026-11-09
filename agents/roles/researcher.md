@@ -30,5 +30,5 @@ Write `report.md` in your output directory with these sections:
 5. **Also noticed** (optional).
 
 Then send your parent the answer, your confidence, and the report path:
-`~/agents/bin/agentctl report "<answer in 1-3 lines> (confidence: <level>) report: <path>"`.
-Then stop.
+`~/agents/bin/agentctl report --final "<answer in 1-3 lines> (confidence: <level>) report: <path>"`.
+`--final` closes your pane after delivery: you are single-use.

@@ -37,6 +37,11 @@ The service runs `agentctl watch`. The watcher listens for the herdr `workspace_
 - The CoS and the leads choose the child role by the verb. A researcher finds something out, a worker changes something, and a reviewer checks a change.
 - Researchers and reviewers are read-only. Each one writes only to its own output directory, `~/agents/spaces/<workspace>/research/<agent>/` or `.../reviews/<agent>/`. A researcher can search the web, and it returns a report with an answer, a confidence level and cited evidence.
 - Children report to their parent with `agentctl report`. The message goes into the parent pane.
+- Workers, reviewers and researchers are single-use. A child sends its last report with `agentctl report --final`. Then `agentctl` marks it done and closes its pane. A parent never sends a second task to a finished child. It starts a new one and gives it the earlier output.
+- A lead owns its area. It plans, delegates, integrates and verifies. It does small tasks itself and gives longer, parallel or context-heavy tasks to fresh children. Only one agent edits a worktree at a time.
+- The CoS refreshes a lead at a new phase, after a major milestone, or when the context of the lead is more than about 60% full. The old lead writes `handoff.md`, and a new lead starts from it.
+- Before a lead asks to push, merge or post, a fresh reviewer checks the change. The decision includes the path of the findings file.
+- If the watcher was down when a space was created, it starts the CoS when it reconnects.
 
 ### Decisions and alerts
 
