@@ -31,7 +31,9 @@ The service runs `agentctl watch`. The watcher listens for the herdr `workspace_
 - The CoS works only in its own space. It ignores other spaces.
 - The CoS decides which leads the space needs. It can start, expand, split, merge or retire a lead at any time.
 - Each lead opens in its own tab. The tab label is a short task title, for example `review auth token refresh PR`. The title must contain a verb and an object, and it must be 40 characters or fewer.
-- A lead can start worker and reviewer agents. These open as splits in the tab of the lead.
+- A lead can start worker, reviewer and researcher agents. These open as splits in the tab of the lead. The CoS can also start them directly.
+- The CoS and the leads choose the child role by the verb. A researcher finds something out, a worker changes something, and a reviewer checks a change.
+- Researchers and reviewers are read-only. Each one writes only to its own output directory, `~/agents/spaces/<workspace>/research/<agent>/` or `.../reviews/<agent>/`. A researcher can search the web, and it returns a report with an answer, a confidence level and cited evidence.
 - Children report to their parent with `agentctl report`. The message goes into the parent pane.
 
 ### Decisions and alerts
@@ -64,6 +66,9 @@ If one vendor does not start, `agentctl` tries the other vendor.
 
 - Claude agents use auto permission mode and the deny rules in `agents/settings.json`. These rules block merges, force pushes, pushes to `main` or `master`, and herdr server and workspace control.
 - Codex agents use `--approve-for-me`, which is automatic approval review. Codex does not read the Claude deny rules. The role prompts and the automatic review protect Codex agents.
+- Researchers and reviewers cannot write outside their output directory:
+  - A Codex researcher or reviewer runs in a workspace-write sandbox whose only writable root is the output directory. `/tmp` is excluded, and approvals are never granted.
+  - A Claude researcher or reviewer gets its own settings file. That file denies edits to the repo, which also covers shell redirects and file commands, and it sets `blockWritesOutsideWorkingDirectories`. The output directory is the only other working directory.
 - Agents never answer a folder-trust or permission dialog. When a dialog appears, the CoS asks you to answer it.
 - Folder trust is separate for Claude and Codex. If Claude trusts a folder, a Codex agent gets a trust override for that session only. If only Codex trusts a folder, the agent uses Codex.
 
@@ -83,7 +88,7 @@ The review action writes the diff against the merge base with the default branch
 | Command | Use |
 |---|---|
 | `agentctl start-cos [workspace]` | Start a CoS in a space that already exists |
-| `agentctl spawn lead\|worker\|reviewer <slug> --title "<task>" --task -` | Start an agent (the CoS and leads use this command) |
+| `agentctl spawn lead\|worker\|reviewer\|researcher <slug> --title "<task>" --task -` | Start an agent (the CoS and leads use this command) |
 | `agentctl report "<text>"` | Send a message to the parent agent |
 | `agentctl needs-you "<text>"` | Alert the user that a decision is waiting |
 | `agentctl ls` | List the agents in the current space |
@@ -94,7 +99,7 @@ The review action writes the diff against the merge base with the default branch
 | Path | Contents |
 |---|---|
 | `agents/bin/agentctl` | The watcher and the agent commands |
-| `agents/roles/` | Role prompts for the chief of staff, leads, workers and reviewers |
+| `agents/roles/` | Role prompts for the chief of staff, leads, workers, reviewers and researchers |
 | `agents/context.example.md` | A template for your personal `~/agents/context.md` |
 | `agents/models.json` | Vendors, tiers and models |
 | `agents/settings.json` | Deny rules for Claude agents |

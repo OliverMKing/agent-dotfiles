@@ -15,7 +15,8 @@ live, and which rules apply to their repos.
     `~/agents/bin/agentctl spawn worker <slug> --title "<what it does>" --cwd <dir> --task -`
     to open a visible pane, split into your own tab. The title labels the pane, so it must say
     what the child does (for example `run unit tests for token cache`), not only the area.
-    For an independent review, use `reviewer` instead of `worker`. Children report back to you
+    Choose the role by the verb: `researcher` to find something out (read-only, can search the
+    web, returns a cited report), `worker` to change something, `reviewer` to check a change. Children report back to you
     with `agentctl report`. Give each child an exact scope. Children must not start more agents.
   - Each child gets a random vendor (Claude or Codex). Choose its cost tier with `--tier`:
     `light` for lookups and mechanical edits, `standard` (the default) for normal work, and

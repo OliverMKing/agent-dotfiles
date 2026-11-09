@@ -3,14 +3,15 @@
 
   agentctl watch                      daemon: start a CoS in every newly created herdr workspace
   agentctl start-cos [WORKSPACE_ID]   start a CoS in a workspace (default: the current one)
-  agentctl spawn ROLE SLUG --title T --task T
+  agentctl spawn ROLE SLUG --title T --task T   (ROLE: lead|worker|reviewer|researcher)
                                       (CoS/leads) start an agent: leads get a tab labeled TITLE;
                                       workers/reviewers split into their lead's tab
   agentctl report TEXT                (any child) send TEXT to the parent agent's pane
   agentctl needs-you TEXT             (CoS) alert the user that a decision is waiting
   agentctl ls                         agents in this space
 
-Roles: lead, worker, reviewer (role prompts in ~/agents/roles/).
+Roles: lead, worker, reviewer, researcher (role prompts in ~/agents/roles/).
+Reviewers and researchers are read-only: they may only write their own output directory.
 """
 import argparse
 import json
@@ -82,7 +83,12 @@ def trusted_by(cwd):
     try:
         projects = json.load(open(os.path.join(HOME, ".claude.json"))).get("projects", {})
         roots = [k for k, v in projects.items() if v.get("hasTrustDialogAccepted")]
-        if _under(cwd, roots):
+        # Claude also asks again for a new repo under a trusted parent, so match the folder or
+        # its git root exactly (a trusted parent only covers non-repo subfolders).
+        exact = {os.path.realpath(r) for r in roots}
+        root = git_root(cwd)
+        in_repo = os.path.realpath(root) != os.path.realpath(cwd) or os.path.isdir(os.path.join(cwd, ".git"))
+        if os.path.realpath(cwd) in exact or os.path.realpath(root) in exact or (not in_repo and _under(cwd, roots)):
             out.add("claude")
     except (OSError, ValueError):
         pass
@@ -146,13 +152,36 @@ def extra_dirs():
     return ["--add-dir", MEMDIR] if os.path.isdir(MEMDIR) else []
 
 
-def agent_args(role, choice, cwd=None):
+READ_ONLY_ROLES = ("researcher", "reviewer")  # may only write their own report dir
+
+
+def read_only_settings(outdir, cwd):
+    """Write .build/settings-<agent>.json: base deny rules + no writes to the repo or outside."""
+    cfg = json.load(open(SETTINGS))
+    perms = cfg.setdefault("permissions", {})
+    for d in dict.fromkeys([git_root(cwd), cwd] if cwd else []):
+        perms.setdefault("deny", []).append(f"Edit(/{os.path.realpath(d)}/**)")  # //abs/path
+    perms["blockWritesOutsideWorkingDirectories"] = True
+    os.makedirs(BUILD, exist_ok=True)
+    path = os.path.join(BUILD, f"settings-{os.path.basename(outdir)}.json")
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=1)
+    return path
+
+
+def agent_args(role, choice, cwd=None, outdir=None):
+    read_only = role in READ_ONLY_ROLES
     if choice["vendor"] == "claude":
         a = ["--model", choice["model"], "--effort", choice["effort"], "--permission-mode", "auto",
-             "--settings", SETTINGS, "--add-dir", AGENTS, *extra_dirs(),
-             "--append-system-prompt-file", role_file(role)]
-        if role == "reviewer":
-            a += ["--disallowed-tools", "Edit", "Write", "NotebookEdit"]
+             "--settings", SETTINGS, "--append-system-prompt-file", role_file(role)]
+        if read_only:
+            # Hard confinement: per-agent settings deny edits to the repo (also covers Bash
+            # redirects / tee / file commands) and block tool writes outside the working dirs,
+            # so only outdir (an --add-dir) is writable. Verified with claude 2.1.319.
+            a[a.index("--settings") + 1] = read_only_settings(outdir, cwd)
+            a += ["--add-dir", outdir, "--disallowed-tools", "Edit", "NotebookEdit"]
+        else:
+            a += ["--add-dir", AGENTS, *extra_dirs()]
         return a
     # codex: --no-daemon so shell commands inherit this pane's env (HERDR_*, AGENT_*);
     # --approve-for-me = automatic approval review (closest to claude auto mode);
@@ -164,11 +193,20 @@ def agent_args(role, choice, cwd=None):
         # one inline table: codex's -c splits dotted keys and can't address a quoted path key
         paths = dict.fromkeys([root, cwd])
         trust = ["-c", "projects={" + ", ".join(f'{json.dumps(x)} = {{ trust_level = "trusted" }}' for x in paths) + "}"]
-    return ["--no-daemon", "-p", codex_profile(role), "-m", choice["model"], *trust,
-            "-c", f'model_reasoning_effort="{choice["effort"]}"',
-            "-c", "sandbox_workspace_write.network_access=true",
-            "-c", "check_for_update_on_startup=false",
-            "--approve-for-me", "--add-dir", AGENTS, *extra_dirs()]
+    common = ["--no-daemon", "-p", codex_profile(role), "-m", choice["model"],
+              "-c", f'model_reasoning_effort="{choice["effort"]}"',
+              "-c", "sandbox_workspace_write.network_access=true",
+              "-c", "check_for_update_on_startup=false"]
+    if read_only:
+        # Hard confinement: the sandbox's writable workspace is ONLY the report dir (-C), /tmp is
+        # excluded, and approvals are never granted, so it cannot write the repo or anything else.
+        # Reads, network (web search, herdr socket for `agentctl report`) still work.
+        # Codex's working root is the agent's own output dir, so that is the only folder to trust.
+        trust = ["-c", "projects={" + json.dumps(outdir) + ' = { trust_level = "trusted" } }']
+        return [*common, *trust, "-s", "workspace-write", "-C", outdir, "-a", "never", "--search",
+                "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]
+    return [*common, *trust, "--approve-for-me", "--add-dir", AGENTS, *extra_dirs()]
 
 
 def agent_by_name(name):
@@ -185,7 +223,7 @@ def pane_has_agent(pane_id):
     return True
 
 
-def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, timeout_ms=60000):
+def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, outdir=None, timeout_ms=60000):
     """Start a random-vendor agent in pane; fall back to the other vendor if launch fails.
     Returns (state, choice): state is 'ready' or 'blocked' (e.g. trust dialog)."""
     first = pick(role, tier, vendor, cwd)
@@ -197,7 +235,7 @@ def start_agent(name, pane, role, tier=None, vendor=None, cwd=None, timeout_ms=6
         for _ in range(15):
             try:
                 herdr("agent", "start", name, "--kind", choice["vendor"], "--pane", pane,
-                      "--timeout", str(timeout_ms), "--", *agent_args(role, choice, cwd))
+                      "--timeout", str(timeout_ms), "--", *agent_args(role, choice, cwd, outdir))
                 return "ready", choice
             except HerdrError as e:
                 if e.code == "agent_not_ready":
@@ -278,9 +316,13 @@ def start_cos(wid, wait_trust_ms=900000):
 
 CHILD_HEADER = """You are {name} (role: {role}) in herdr space {wid}. Your parent agent is {parent}.
 Report to your parent ONLY with: ~/agents/bin/agentctl report "<message>"
-(milestones, when you need a decision, when blocked, when done). Your task:
+(milestones, when you need a decision, when blocked, when done).{extra} Your task:
 
 {task}"""
+
+OUTDIR_NOTE = """
+You are read-only. The ONLY place you may write is your output directory: {outdir}
+Put your report there. The code you are asked about is in {cwd} (read it; do not change it)."""
 
 
 def my_name():
@@ -336,7 +378,14 @@ def cmd_spawn(a):
         raise SystemExit(f"agent {name} already exists; pick another slug or message it")
     task = a.task if a.task != "-" else sys.stdin.read()
     cwd = os.path.abspath(os.path.expanduser(a.cwd or os.getcwd()))
+    outdir = None
+    if a.role in READ_ONLY_ROLES:
+        outdir = os.path.join(space_dir(wid), "research" if a.role == "researcher" else "reviews", name)
+        os.makedirs(outdir, exist_ok=True)
     env = {"AGENT_NAME": name, "AGENT_PARENT": parent, "AGENT_ROLE": a.role, "AGENT_SPACE": wid}
+    if outdir:
+        env["AGENT_OUTDIR"] = outdir
+    extra = OUTDIR_NOTE.format(outdir=outdir, cwd=os.path.abspath(os.path.expanduser(a.cwd or os.getcwd()))) if outdir else ""
     title = " ".join(a.title.split())
     if len(title.split()) < 2 or title.lower().replace(" ", "-") == slug:
         raise SystemExit("--title must say what the agent does, in 2+ words "
@@ -345,8 +394,8 @@ def cmd_spawn(a):
         raise SystemExit(f"--title is {len(title)} chars; keep it to {TITLE_MAX} so the tab label is not cut off "
                          "(verb + object, e.g. 'review auth token refresh PR')")
     pane = place_pane(wid, a.role, slug, title, parent, cwd, env)
-    state, choice = start_agent(name, pane, a.role, a.tier, a.vendor, cwd)
-    out = {"name": name, "title": title, "pane": pane, "role": a.role, "parent": parent, "cwd": cwd,
+    state, choice = start_agent(name, pane, a.role, a.tier, a.vendor, cwd, outdir)
+    out = {"outdir": outdir, "name": name, "title": title, "pane": pane, "role": a.role, "parent": parent, "cwd": cwd,
            "model": choice}
     if state == "blocked":
         screen = herdr("agent", "read", name, "--source", "visible", check=False)
@@ -354,10 +403,10 @@ def cmd_spawn(a):
                    f"pane {pane}; then run: agentctl send-pending {name}.",
                    screen=str(screen.get("read", screen))[-800:])
         with open(os.path.join(space_dir(wid), f"pending-task-{name}.md"), "w") as f:
-            f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task))
+            f.write(CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
         print(json.dumps(out, indent=1))
         sys.exit(3)
-    herdr("agent", "prompt", name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task))
+    herdr("agent", "prompt", name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
     out["status"] = "started"
     print(json.dumps(out, indent=1))
 
@@ -472,7 +521,7 @@ def main():
     s.add_parser("watch").set_defaults(f=cmd_watch)
     x = s.add_parser("start-cos"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_start_cos)
     x = s.add_parser("spawn")
-    x.add_argument("role", choices=["lead", "worker", "reviewer"])
+    x.add_argument("role", choices=["lead", "worker", "reviewer", "researcher"])
     x.add_argument("slug", help="short id for the agent name, e.g. dd-kv-cert")
     x.add_argument("--title", required=True,
                    help="tab/pane label saying what it does, 2+ words, <=40 chars, "

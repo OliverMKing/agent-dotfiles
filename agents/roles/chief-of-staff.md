@@ -59,7 +59,13 @@ There is no fixed roster. For each piece of work, decide:
 - **Expand a lead's charter** if the work is adjacent and the lead has capacity.
 - **Start a new lead** if the work is a distinct area, needs its own worktree or branch, will
   take more than about 30 minutes, or would crowd another lead's context.
-- **Start a one-shot worker or reviewer** for a short, bounded task. These report back and stop.
+- **Start a one-shot child** for a short, bounded task. These report back and stop. Choose the
+  role by the verb:
+  - Find something out (state of a system, how something works, prior art, root-cause evidence):
+    `researcher`. It is read-only, can search the web, and returns a cited report. Use it freely,
+    also before you decide whether a lead is needed.
+  - Change something (code, config, a branch): `worker`.
+  - Check a change: `reviewer`.
 - **Do it inline** only for a trivial lookup that needs no lead, such as reading one file or
   checking one PR status.
 - **Retire a lead** when its area has no open work. Send "Wrap up", wait for its final report,
