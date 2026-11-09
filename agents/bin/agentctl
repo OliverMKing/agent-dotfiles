@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import random
+import select
 import re
 import socket
 import subprocess
@@ -399,6 +400,8 @@ def cmd_spawn(a):
            "model": choice}
     if state == "blocked":
         screen = herdr("agent", "read", name, "--source", "visible", check=False)
+        reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
+                   model=choice, started=time.time(), last_report=0, state="pending")
         out.update(status="blocked_at_startup", hint="Likely a folder-trust dialog. Ask the user to answer it in "
                    f"pane {pane}; then run: agentctl send-pending {name}.",
                    screen=str(screen.get("read", screen))[-800:])
@@ -407,6 +410,8 @@ def cmd_spawn(a):
         print(json.dumps(out, indent=1))
         sys.exit(3)
     herdr("agent", "prompt", name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
+    reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
+               model=choice, started=time.time(), last_report=0, state="running")
     out["status"] = "started"
     print(json.dumps(out, indent=1))
 
@@ -419,6 +424,7 @@ def cmd_send_pending(a):
         raise SystemExit(f"{a.name} is not idle yet (still blocked?)")
     herdr("agent", "prompt", a.name, open(path).read())
     os.remove(path)
+    reg_update(wid, a.name, state="running")
     print(json.dumps({"name": a.name, "status": "task_sent"}))
 
 
@@ -431,6 +437,8 @@ def cmd_report(a):
     for attempt in range(20):
         try:
             herdr("agent", "prompt", parent, f"[from {me}] {text}")
+            if os.environ.get("AGENT_SPACE") and me != "?":
+                reg_update(os.environ["AGENT_SPACE"], me, last_report=time.time())
             print(json.dumps({"delivered_to": parent}))
             return
         except HerdrError as e:
@@ -471,14 +479,214 @@ def cmd_start_cos(a):
 
 # ------------------------------------------------------------------ watcher
 
+# ------------------------------------------------------------------ child registry + watchdog
+
+def reg_path(wid, agent):
+    d = os.path.join(space_dir(wid), "agents")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{agent}.json")
+
+
+def reg_update(wid, agent, **fields):
+    path = reg_path(wid, agent)
+    try:
+        data = json.load(open(path))
+    except (OSError, ValueError):
+        data = {}
+    data.update(fields)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
+    return data
+
+
+def reg_all():
+    out = []
+    if not os.path.isdir(SPACES):
+        return out
+    for wid in os.listdir(SPACES):
+        d = os.path.join(SPACES, wid, "agents")
+        if wid.startswith("_") or not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            if fn.endswith(".json"):
+                try:
+                    out.append(dict(json.load(open(os.path.join(d, fn))), workspace_id=wid))
+                except (OSError, ValueError):
+                    pass
+    return out
+
+
+def tell(parent, text, user_title=None):
+    """Type a [watch] note into the parent's pane; if that fails, alert the user instead."""
+    for _ in range(20):
+        try:
+            herdr("agent", "prompt", parent, f"[watch] {text}")
+            return True
+        except HerdrError as e:
+            if e.code != "agent_blocked":
+                break
+            time.sleep(15)
+    herdr("notification", "show", user_title or "Agent watchdog", "--body", text[:300],
+          "--sound", "request", check=False)
+    return False
+
+
+def screen_tail(name, n=4):
+    r = herdr("agent", "read", name, "--source", "visible", check=False)
+    lines = [l.strip() for l in str(r.get("raw", "")).splitlines() if l.strip() and not set(l.strip()) <= set("─━│ ")]
+    return " | ".join(lines[-n:])[:300]
+
+
+BLOCKED_GRACE = 30   # s a child may sit at a dialog before the parent is told
+SILENT_GRACE = 20    # s after a turn ends before "ended a turn without reporting"
+
+
+class ChildWatch(threading.Thread):
+    """Follows one spawned child's status via a per-pane herdr subscription."""
+
+    def __init__(self, entry):
+        super().__init__(daemon=True)
+        self.e = entry
+        self.turn_start = None
+        self.alerted_turn = None
+        self.blocked_since = None
+        self.last_alive_check = time.time()
+        self.stop = False
+
+    def run(self):
+        e = self.e
+        try:
+            s = socket.socket(socket.AF_UNIX)
+            s.connect(SOCK)
+            req = {"id": f"watch-{e['name']}", "method": "events.subscribe",
+                   "params": {"subscriptions": [{"type": "pane.agent_status_changed", "pane_id": e["pane"]}]}}
+            s.sendall((json.dumps(req) + "\n").encode())
+            buf = b""
+            # the child may already be mid-turn when we attach
+            cur = herdr("agent", "get", e["name"], check=False).get("agent", {}).get("agent_status")
+            if cur:
+                self.on_status(cur)
+        except OSError as err:
+            log(f"watch {e['name']}: subscribe failed: {err}")
+            return
+        log(f"watch {e['name']}: following pane {e['pane']} for {e['parent']}")
+        # select + own line buffer: a timed-out socket.makefile() can never be read again
+        while not self.stop:
+            try:
+                ready, _, _ = select.select([s], [], [], 5)
+                if ready:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        log(f"watch {e['name']}: stream closed")
+                        return
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        try:
+                            ev = json.loads(line)
+                        except ValueError:
+                            continue
+                        if ev.get("id"):  # subscription ack
+                            continue
+                        status = (ev.get("data") or {}).get("agent_status") or ev.get("agent_status")
+                        if status:
+                            self.on_status(status)
+                self.tick()
+            except Exception as err:  # noqa: BLE001 - keep watching
+                log(f"watch {e['name']}: {err}")
+                time.sleep(5)
+        s.close()
+
+    def on_status(self, status):
+        now = time.time()
+        if status == "working":
+            if self.turn_start is None or self.e.get("_last_status") in ("done", "idle", "blocked"):
+                self.turn_start = now
+            self.blocked_since = None
+        elif status == "blocked":
+            self.blocked_since = self.blocked_since or now
+        else:
+            self.blocked_since = None
+        self.e["_last_status"], self.e["_status_at"] = status, now
+
+    def tick(self):
+        e, now = self.e, time.time()
+        if now - self.last_alive_check >= 60:
+            self.last_alive_check = now
+            if not agent_by_name(e["name"]):  # agent process ended (pane is back at a shell) or pane gone
+                reg_update(e["workspace_id"], e["name"], state="exited", ended=now)
+                self.stop = True
+                panes = {p["pane_id"] for p in herdr("pane", "list", check=False).get("panes", [])}
+                if e["pane"] in panes:  # pane still there: the agent died, it was not retired
+                    tell(e["parent"], f"{e['name']} ({e.get('title', '')}) is no longer running; pane {e['pane']} "
+                                      "is back at a shell. Restart it with a summary of its progress, or retire it.")
+                return
+        status, at = e.get("_last_status"), e.get("_status_at", now)
+        title = f"{e['name']} ({e.get('title', '')})"
+        if status == "blocked" and self.blocked_since and now - self.blocked_since >= BLOCKED_GRACE:
+            self.blocked_since = float("inf")  # once per blocked episode
+            tell(e["parent"], f"{title} is blocked on a dialog in pane {e['pane']}: {screen_tail(e['name'])}. "
+                              "If it needs the user, add it to Needs you; do not answer it yourself.")
+        if status in ("done", "idle") and self.turn_start and now - at >= SILENT_GRACE \
+                and self.alerted_turn != self.turn_start:
+            last_report = (json.load(open(reg_path(e["workspace_id"], e["name"]))) or {}).get("last_report", 0)
+            if last_report < self.turn_start:
+                self.alerted_turn = self.turn_start
+                tell(e["parent"], f"{title} ended a turn without reporting. Last lines: {screen_tail(e['name'])}. "
+                                  f"Check it: herdr agent read {e['name']} --source recent-unwrapped --lines 80")
+
+
+def watchdog_loop():
+    watching = {}
+    while True:
+        try:
+            for e in reg_all():
+                key = e.get("name")
+                if e.get("state") == "running" and key not in watching and e.get("pane") and e.get("parent"):
+                    w = ChildWatch(e)
+                    watching[key] = w
+                    w.start()
+                elif e.get("state") != "running" and key in watching:
+                    watching.pop(key).stop = True
+            for key in [k for k, w in watching.items() if not w.is_alive()]:
+                watching.pop(key)
+        except Exception as err:  # noqa: BLE001
+            log("watchdog:", err)
+        time.sleep(10)
+
+
+def on_pane_gone(pane_id, exited):
+    for e in reg_all():
+        if e.get("pane") == pane_id and e.get("state") == "running":
+            reg_update(e["workspace_id"], e["name"], state="exited" if exited else "closed", ended=time.time())
+            if exited:
+                threading.Thread(target=tell, daemon=True, args=(
+                    e["parent"], f"{e['name']} ({e.get('title', '')}) exited; its pane {pane_id} is now a shell. "
+                                 "Restart it with a summary of its progress, or retire it.")).start()
+    for wid in os.listdir(SPACES) if os.path.isdir(SPACES) else []:
+        sp = os.path.join(SPACES, wid, "space.json")
+        try:
+            meta = json.load(open(sp))
+        except (OSError, ValueError):
+            continue
+        if meta.get("pane") == pane_id and exited:
+            herdr("notification", "show", f"Chief of staff exited ({meta.get('label') or wid})",
+                  "--body", f"{meta.get('cos')} in pane {pane_id} exited. Restart: agentctl start-cos {wid}",
+                  "--sound", "request", check=False)
+
+
 def cmd_watch(a):
+    threading.Thread(target=watchdog_loop, daemon=True).start()
     seen = set()
     while True:
         try:
             s = socket.socket(socket.AF_UNIX)
             s.connect(SOCK)
             req = {"id": "agentctl-watch", "method": "events.subscribe",
-                   "params": {"subscriptions": [{"type": "workspace.created"}, {"type": "workspace.closed"}]}}
+                   "params": {"subscriptions": [{"type": "workspace.created"}, {"type": "workspace.closed"},
+                                                {"type": "pane.exited"}, {"type": "pane.closed"}]}}
             s.sendall((json.dumps(req) + "\n").encode())
             f = s.makefile()
             log("subscribed:", f.readline().strip()[:120])
@@ -494,6 +702,10 @@ def cmd_watch(a):
                     if wid and wid not in seen:
                         seen.add(wid)
                         threading.Thread(target=safe_start_cos, args=(wid,), daemon=True).start()
+                elif kind in ("pane_exited", "pane_closed"):
+                    pid = data.get("pane_id") or (data.get("pane") or {}).get("pane_id")
+                    if pid:
+                        on_pane_gone(pid, kind == "pane_exited")
                 elif kind == "workspace_closed":
                     wid = data.get("workspace_id") or data.get("workspace", {}).get("workspace_id")
                     if wid and os.path.isdir(os.path.join(SPACES, wid)):

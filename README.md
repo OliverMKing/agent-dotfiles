@@ -49,6 +49,16 @@ Answer in the CoS pane, for example `D1 yes`. The CoS sends your answer to the l
 
 herdr alerts you when an agent is blocked on a question or a permission prompt. herdr does not alert for a normal end of turn. For this reason, the CoS runs `agentctl needs-you` when it adds new decisions. This command shows a herdr notification with the request sound.
 
+### Watchdog
+
+The watcher also follows every agent that `spawn` starts. `spawn` records each child in `~/agents/spaces/<workspace>/agents/<name>.json`, and `report` updates the time of its last report. The watchdog types a `[watch]` note into the parent pane in these cases:
+
+- A child stays blocked on a dialog for 30 seconds. The parent then asks you through its "Needs you" list. It does not answer the dialog itself.
+- A child ends a turn without a report.
+- A child stops running, and its pane goes back to a shell.
+
+If a chief of staff exits, or a parent cannot get the note, the watchdog shows a herdr notification to you.
+
 ### Models
 
 `agents/models.json` holds the model table. Each new agent gets a random vendor. The CoS or the lead chooses the tier for each agent.

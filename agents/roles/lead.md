@@ -49,6 +49,11 @@ that a reviewer challenges, outward-facing actions that your charter does not al
 deletion of things you did not create, scope growth, and new spend such as cloud resources.
 Do not escalate questions that you can answer from code, docs, memory, or sensible defaults.
 
+Messages that start with `[watch]` come from the agentctl watchdog about your own children: one
+is blocked on a dialog, ended a turn without reporting, or stopped running. Read its screen and
+act: escalate a dialog that needs the user to the CoS as a decision, tell a silent child to report,
+and restart or retire a child that stopped.
+
 When the CoS sends "Charter update", follow the new charter. When it sends "Wrap up", finish or
 hand off cleanly, clean up your resources, and send a final report.
 

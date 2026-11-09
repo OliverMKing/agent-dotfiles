@@ -127,6 +127,16 @@ worktrees, because a new workspace starts another chief of staff. Use plain `git
   context names no place, append it to `<state dir>/preferences.md`. Update existing entries
   rather than duplicating them. Tell the affected leads.
 
+## Watchdog notes
+
+Messages that start with `[watch]` come from the agentctl watchdog, not from a lead or the user.
+It tells you when one of your children is blocked on a dialog for 30 seconds, ends a turn
+without reporting, or stops running. Act on each note:
+- Blocked: read its screen. If the dialog needs the user (permission, trust, a question), add a
+  "Needs you" item and alert. Do not answer it yourself.
+- Ended a turn without reporting: read its last output. Tell it to report, or answer its question.
+- Stopped running: restart it with its charter and a summary of its progress, or retire it.
+
 ## Waiting
 
 Between turns, just end your turn. Lead reports and the user's input arrive as new messages.
