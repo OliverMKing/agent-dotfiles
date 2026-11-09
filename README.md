@@ -59,6 +59,16 @@ The watcher also follows every agent that `spawn` starts. `spawn` records each c
 
 If a chief of staff exits, or a parent cannot get the note, the watchdog shows a herdr notification to you.
 
+### Restart and resume
+
+herdr resumes agent panes after a server restart. herdr's own Claude and Codex integrations resume with only `claude --resume <id>` or `codex resume <id>`. That command loses the model, the permission mode, the settings, the role prompt and the agent environment. To prevent this, the watchdog reports a resume command for every agent that `agentctl` starts:
+
+```
+agentctl resume <agent> <session-id>
+```
+
+After a restart, herdr runs this command in the restored pane. `agentctl resume` reads the agent from the registry. It restores the `AGENT_*` environment, which includes the parent link, and starts the same vendor with the same arguments and the resume flag. `install.sh` links `agentctl` into `~/.local/bin`, because herdr needs a plain command name on `PATH`.
+
 ### Models
 
 `agents/models.json` holds the model table. Each new agent gets a random vendor. The CoS or the lead chooses the tier for each agent.
@@ -102,6 +112,7 @@ The review action writes the diff against the merge base with the default branch
 | `agentctl report "<text>"` | Send a message to the parent agent |
 | `agentctl needs-you "<text>"` | Alert the user that a decision is waiting |
 | `agentctl ls` | List the agents in the current space |
+| `agentctl resume <agent> <session-id>` | Start an agent again with its full settings (herdr runs this after a restart) |
 | `systemctl --user stop herdr-space-cos` | Stop new spaces from getting a CoS |
 
 ## Layout

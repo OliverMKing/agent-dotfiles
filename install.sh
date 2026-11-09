@@ -26,6 +26,10 @@ for item in bin roles models.json settings.json context.example.md; do
   if [ -e "$dst" ] && [ ! -L "$dst" ]; then mv "$dst" "$dst.bak-$STAMP"; warn "moved old $dst to $dst.bak-$STAMP"; fi
   ln -sfn "$REPO/agents/$item" "$dst"
 done
+# herdr resumes agents after a server restart with `agentctl resume ...`; it must be a plain name on PATH
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$AGENTS_HOME/bin/agentctl" "$HOME/.local/bin/agentctl"
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn "add ~/.local/bin to PATH so herdr can resume agents" ;; esac
 if [ ! -e "$AGENTS_HOME/context.md" ]; then
   cp "$REPO/agents/context.example.md" "$AGENTS_HOME/context.md"
   warn "created $AGENTS_HOME/context.md from the example; edit it with your own context"

@@ -301,6 +301,8 @@ def start_cos(wid, wait_trust_ms=900000):
     with open(os.path.join(sdir, "space.json"), "r+") as f:
         meta = json.load(f); meta["cos_model"] = choice; f.seek(0); json.dump(meta, f, indent=1); f.truncate()
     log(f"{name}: {choice['vendor']} {choice['model']} ({choice['effort']})")
+    reg_update(wid, name, name=name, parent=None, role="chief-of-staff", title=COS_LABEL, pane=pane["pane_id"],
+               cwd=pane.get("cwd"), model=choice, started=time.time(), last_report=0, state="running")
     if state == "blocked":
         log(f"{name}: waiting for the user to answer a startup dialog (trust?) in {pane['pane_id']}")
         if not wait_idle(name, wait_trust_ms):
@@ -401,7 +403,7 @@ def cmd_spawn(a):
     if state == "blocked":
         screen = herdr("agent", "read", name, "--source", "visible", check=False)
         reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
-                   model=choice, started=time.time(), last_report=0, state="pending")
+                   model=choice, outdir=outdir, started=time.time(), last_report=0, state="pending")
         out.update(status="blocked_at_startup", hint="Likely a folder-trust dialog. Ask the user to answer it in "
                    f"pane {pane}; then run: agentctl send-pending {name}.",
                    screen=str(screen.get("read", screen))[-800:])
@@ -411,7 +413,7 @@ def cmd_spawn(a):
         sys.exit(3)
     herdr("agent", "prompt", name, CHILD_HEADER.format(name=name, role=a.role, wid=wid, parent=parent, task=task, extra=extra))
     reg_update(wid, name, name=name, parent=parent, role=a.role, title=title, pane=pane, cwd=cwd,
-               model=choice, started=time.time(), last_report=0, state="running")
+               model=choice, outdir=outdir, started=time.time(), last_report=0, state="running")
     out["status"] = "started"
     print(json.dumps(out, indent=1))
 
@@ -461,6 +463,33 @@ def cmd_needs_you(a):
     r = herdr("notification", "show", f"Chief of staff · {label}: needs you", "--body", text[:300],
               "--sound", "request", check=False)
     print(json.dumps({"shown": r.get("shown"), "reason": r.get("reason")}))
+
+
+def cmd_resume(a):
+    """Run by herdr after a server restart (the reported resume command): relaunch the agent with the
+    same vendor, model, role prompt, settings and environment, resuming its native session."""
+    entry = next((e for e in reg_all() if e.get("name") == a.name), None)
+    if not entry:  # unknown agent: fall back to what the official integration would have run
+        log(f"resume {a.name}: not in registry; plain resume")
+        os.execvp("claude", ["claude", "--resume", a.session_id])
+    wid, role, choice = entry["workspace_id"], entry["role"], entry["model"]
+    cwd = entry.get("cwd") or os.getcwd()
+    outdir = entry.get("outdir")
+    env = {"AGENT_NAME": a.name, "AGENT_ROLE": role, "AGENT_SPACE": wid}
+    if entry.get("parent"):
+        env["AGENT_PARENT"] = entry["parent"]
+    if outdir:
+        env["AGENT_OUTDIR"] = outdir
+    os.environ.update(env)
+    if os.environ.get("HERDR_PANE_ID"):
+        reg_update(wid, a.name, pane=os.environ["HERDR_PANE_ID"], resumed=time.time())
+    args = agent_args(role, choice, cwd, outdir)
+    if choice["vendor"] == "claude":
+        argv = ["claude", "--resume", a.session_id, *args]
+    else:
+        argv = ["codex", "resume", a.session_id, *args]
+    log(f"resume {a.name}: {choice['vendor']} {choice['model']} session {a.session_id[:8]}")
+    os.execvp(argv[0], argv)
 
 
 def cmd_ls(a):
@@ -553,6 +582,7 @@ class ChildWatch(threading.Thread):
         self.alerted_turn = None
         self.blocked_since = None
         self.last_alive_check = time.time()
+        self.reported_sid = None
         self.stop = False
 
     def run(self):
@@ -599,8 +629,32 @@ class ChildWatch(threading.Thread):
                 time.sleep(5)
         s.close()
 
+    def sync_resume(self, status):
+        """Tell herdr to resume this pane with `agentctl resume` (full flags) after a server restart,
+        instead of the official integration's bare `claude --resume` / `codex resume`."""
+        e = self.e
+        pane = herdr("pane", "get", e["pane"], check=False).get("pane") or {}
+        sess = pane.get("agent_session") or {}
+        sid = sess.get("value")
+        if not sid or sid == self.reported_sid:
+            return
+        state = {"done": "idle"}.get(status, status if status in ("idle", "working", "blocked") else "idle")
+        r = herdr("pane", "report-agent", e["pane"], "--source", "agentctl", "--agent", e["model"]["vendor"],
+                  "--state", state, "--seq", str(time.time_ns()), "--agent-session-id", sid,
+                  "--", "agentctl", "resume", e["name"], sid, check=False)
+        if "error" not in r:
+            self.reported_sid = sid
+            reg_update(e["workspace_id"], e["name"], session_id=sid)
+            log(f"watch {e['name']}: resume command reported for session {sid[:8]}")
+        else:
+            log(f"watch {e['name']}: report-agent failed: {r}")
+
     def on_status(self, status):
         now = time.time()
+        try:
+            self.sync_resume(status)
+        except Exception as err:  # noqa: BLE001
+            log(f"watch {self.e['name']}: resume sync: {err}")
         if status == "working":
             if self.turn_start is None or self.e.get("_last_status") in ("done", "idle", "blocked"):
                 self.turn_start = now
@@ -613,6 +667,8 @@ class ChildWatch(threading.Thread):
 
     def tick(self):
         e, now = self.e, time.time()
+        if not e.get("parent"):  # a chief of staff: herdr alerts the user itself; only resume sync here
+            return
         if now - self.last_alive_check >= 60:
             self.last_alive_check = now
             if not agent_by_name(e["name"]):  # agent process ended (pane is back at a shell) or pane gone
@@ -644,7 +700,12 @@ def watchdog_loop():
         try:
             for e in reg_all():
                 key = e.get("name")
-                if e.get("state") == "running" and key not in watching and e.get("pane") and e.get("parent"):
+                if e.get("state") == "running" and key not in watching and e.get("pane"):
+                    live = agent_by_name(key)
+                    if not live:
+                        continue
+                    if live["pane_id"] != e["pane"]:
+                        e = reg_update(e["workspace_id"], key, pane=live["pane_id"]) | {"workspace_id": e["workspace_id"]}
                     w = ChildWatch(e)
                     watching[key] = w
                     w.start()
@@ -747,6 +808,8 @@ def main():
     x = s.add_parser("send-pending"); x.add_argument("name"); x.set_defaults(f=cmd_send_pending)
     x = s.add_parser("report"); x.add_argument("text"); x.set_defaults(f=cmd_report)
     x = s.add_parser("ls"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_ls)
+    x = s.add_parser("resume", help="(herdr) relaunch an agent after a server restart")
+    x.add_argument("name"); x.add_argument("session_id"); x.set_defaults(f=cmd_resume)
     x = s.add_parser("needs-you", help="(CoS) alert the user that a decision is waiting")
     x.add_argument("text"); x.set_defaults(f=cmd_needs_you)
     a = p.parse_args()
