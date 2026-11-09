@@ -8,6 +8,7 @@
                                       workers/reviewers split into their lead's tab
   agentctl report TEXT                (any child) send TEXT to the parent agent's pane
   agentctl needs-you TEXT             (CoS) alert the user that a decision is waiting
+  agentctl adopt PANE SLUG --title T  make a hand-started claude/codex pane a lead of the space's CoS
   agentctl ls                         agents in this space
 
 Roles: lead, worker, reviewer, researcher (role prompts in ~/agents/roles/).
@@ -431,10 +432,21 @@ def cmd_send_pending(a):
 
 
 def cmd_report(a):
-    parent = os.environ.get("AGENT_PARENT")
+    parent, me = os.environ.get("AGENT_PARENT"), os.environ.get("AGENT_NAME", "?")
+    if a.as_name:  # adopted agent naming itself (its shell may not carry this pane's env)
+        entry = next((e for e in reg_all() if e.get("name") == a.as_name and e.get("state") == "running"), None)
+        if not entry:
+            raise SystemExit(f"no running registered agent named {a.as_name}")
+        parent, me = entry.get("parent"), entry["name"]
+        os.environ["AGENT_SPACE"] = entry["workspace_id"]
+    elif not parent and os.environ.get("HERDR_PANE_ID"):  # adopted agent: find it by pane
+        entry = next((e for e in reg_all() if e.get("pane") == os.environ["HERDR_PANE_ID"]
+                      and e.get("state") == "running"), None)
+        if entry:
+            parent, me = entry.get("parent"), entry["name"]
+            os.environ.setdefault("AGENT_SPACE", entry["workspace_id"])
     if not parent:
-        raise SystemExit("AGENT_PARENT not set; you are not a spawned agent")
-    me = os.environ.get("AGENT_NAME", "?")
+        raise SystemExit("no parent: not a spawned or adopted agent (AGENT_PARENT unset, pane not registered)")
     text = a.text if a.text != "-" else sys.stdin.read()
     for attempt in range(20):
         try:
@@ -465,6 +477,47 @@ def cmd_needs_you(a):
     print(json.dumps({"shown": r.get("shown"), "reason": r.get("reason")}))
 
 
+def cmd_adopt(a):
+    """Make an agent the user started by hand a lead under this space's chief of staff."""
+    wid = a.workspace or os.environ.get("HERDR_WORKSPACE_ID")
+    pane = herdr("pane", "get", a.pane)["pane"]
+    wid = wid or pane["workspace_id"]
+    vendor = pane.get("agent")
+    if vendor not in ("claude", "codex"):
+        raise SystemExit(f"pane {a.pane} runs {vendor!r}; only claude and codex can be adopted")
+    cos = f"cos-{wid.lower()}"
+    slug = re.sub(r"[^a-z0-9_-]", "-", a.slug.lower()).strip("-")
+    name = f"{wid.lower()}-{slug}"[:32]
+    title = " ".join(a.title.split())
+    if len(title.split()) < 2 or len(title) > TITLE_MAX:
+        raise SystemExit(f"--title must be 2+ words and at most {TITLE_MAX} chars")
+    # the launch options the user chose, read from the running process (minus resume/session words)
+    launch_args = []
+    pids = subprocess.run(["pgrep", "-x", vendor], capture_output=True, text=True).stdout.split()
+    for pid in pids:
+        try:
+            if os.readlink(f"/proc/{pid}/cwd") != (pane.get("foreground_cwd") or pane.get("cwd")):
+                continue
+            argv = open(f"/proc/{pid}/cmdline").read().split("\0")[1:-1]
+        except OSError:
+            continue
+        if argv and argv[0] in ("app-server",):
+            continue
+        launch_args = [x for x in argv if x not in ("resume",)]
+        break
+    herdr("agent", "rename", a.pane, name)
+    tab = pane["tab_id"]
+    herdr("tab", "rename", tab, title, check=False)
+    herdr("pane", "rename", a.pane, title, check=False)
+    reg_update(wid, name, name=name, parent=cos, role="lead", title=title, pane=a.pane,
+               cwd=pane.get("foreground_cwd") or pane.get("cwd"),
+               model={"vendor": vendor, "model": "user-default", "effort": "user-default", "tier": "adopted"},
+               launch_args=launch_args, adopted=True, started=time.time(), last_report=time.time(),
+               state="running")
+    print(json.dumps({"name": name, "parent": cos, "pane": a.pane, "tab": tab, "title": title,
+                      "launch_args": launch_args}, indent=1))
+
+
 def cmd_resume(a):
     """Run by herdr after a server restart (the reported resume command): relaunch the agent with the
     same vendor, model, role prompt, settings and environment, resuming its native session."""
@@ -483,7 +536,8 @@ def cmd_resume(a):
     os.environ.update(env)
     if os.environ.get("HERDR_PANE_ID"):
         reg_update(wid, a.name, pane=os.environ["HERDR_PANE_ID"], resumed=time.time())
-    args = agent_args(role, choice, cwd, outdir)
+    # adopted agents (started by hand, see `adopt`) keep their own launch options
+    args = entry["launch_args"] if entry.get("launch_args") is not None else agent_args(role, choice, cwd, outdir)
     if choice["vendor"] == "claude":
         argv = ["claude", "--resume", a.session_id, *args]
     else:
@@ -806,8 +860,14 @@ def main():
     x.add_argument("--vendor", choices=["claude", "codex"], help="force a vendor (default: random)")
     x.set_defaults(f=cmd_spawn)
     x = s.add_parser("send-pending"); x.add_argument("name"); x.set_defaults(f=cmd_send_pending)
-    x = s.add_parser("report"); x.add_argument("text"); x.set_defaults(f=cmd_report)
+    x = s.add_parser("report"); x.add_argument("text")
+    x.add_argument("--as", dest="as_name", help="report as this registered agent (adopted agents)")
+    x.set_defaults(f=cmd_report)
     x = s.add_parser("ls"); x.add_argument("workspace", nargs="?"); x.set_defaults(f=cmd_ls)
+    x = s.add_parser("adopt", help="make a hand-started claude/codex pane a lead under the space's CoS")
+    x.add_argument("pane"); x.add_argument("slug")
+    x.add_argument("--title", required=True, help="descriptive tab title, 2+ words, <=40 chars")
+    x.add_argument("--workspace"); x.set_defaults(f=cmd_adopt)
     x = s.add_parser("resume", help="(herdr) relaunch an agent after a server restart")
     x.add_argument("name"); x.add_argument("session_id"); x.set_defaults(f=cmd_resume)
     x = s.add_parser("needs-you", help="(CoS) alert the user that a decision is waiting")

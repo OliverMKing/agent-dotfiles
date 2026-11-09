@@ -26,6 +26,8 @@ The install script does these steps:
 
 ## How the chief of staff works
 
+To convert a space that existed before the service started, run `agentctl adopt` for each agent that you started by hand, then run `agentctl start-cos <workspace>`. Then tell the chief of staff about the adopted leads. If the space has no free pane, open a new tab first.
+
 The service runs `agentctl watch`. The watcher listens for the herdr `workspace_created` event. For each new space, it starts an agent in the first pane and labels that tab `chief of staff`.
 
 - The CoS works only in its own space. It ignores other spaces.
@@ -111,6 +113,8 @@ The review action writes the diff against the merge base with the default branch
 | `agentctl spawn lead\|worker\|reviewer\|researcher <slug> --title "<task>" --task -` | Start an agent (the CoS and leads use this command) |
 | `agentctl report "<text>"` | Send a message to the parent agent |
 | `agentctl needs-you "<text>"` | Alert the user that a decision is waiting |
+| `agentctl adopt <pane> <slug> --title "<task>"` | Make an agent that you started by hand a lead of the space's CoS. It keeps its own launch options when herdr resumes it. |
+| `agentctl report --as <name> "<text>"` | Send a report as an adopted agent, whose shell can lack the `AGENT_*` environment |
 | `agentctl ls` | List the agents in the current space |
 | `agentctl resume <agent> <session-id>` | Start an agent again with its full settings (herdr runs this after a restart) |
 | `systemctl --user stop herdr-space-cos` | Stop new spaces from getting a CoS |
