@@ -912,12 +912,15 @@ def cmd_farm(a):
         def do_GET(self):
             try:
                 if self.path in ("/", "/index.html"):
-                    html = open(page, encoding="utf-8").read().replace("__FARM_TOKEN__", token)
+                    html = open(page, encoding="utf-8").read().replace("__FARM_TOKEN__", token) \
+                        .replace("__FARM_VERSION__", str(int(os.path.getmtime(page))))
                     self._send(200, html.encode(), "text/html; charset=utf-8")
                 elif self.path == "/api/farm":
                     with lock:
                         if time.time() - cache["t"] > 2:
-                            cache["body"], cache["t"] = json.dumps(farm_state()).encode(), time.time()
+                            st = farm_state()
+                            st["page_version"] = str(int(os.path.getmtime(page)))  # open pages reload on change
+                            cache["body"], cache["t"] = json.dumps(st).encode(), time.time()
                         body = cache["body"]
                     self._send(200, body, "application/json")
                 elif self.path == "/api/quota":

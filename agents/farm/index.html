@@ -189,6 +189,7 @@ function kindLabel(a) {
 const BUBBLE = { working: "", idle: "💤", done: "💤", blocked: "❗", unknown: "❔" };
 let state = null, openName = null, detailTimer = null;
 const TOKEN = "__FARM_TOKEN__";
+const PAGE_VERSION = "__FARM_VERSION__";
 const KIND_TAG = { decision: "", dialog: "Dialog", draft: "Draft", down: "Down" };
 let seenNeeds = null;
 function needKey(n, s) { return `${s.id}|${n.kind}|${n.id}`; }
@@ -302,7 +303,9 @@ function render() {
 async function refresh() {
   try {
     const r = await fetch("/api/farm", { cache: "no-store" });
-    state = await r.json(); render();
+    state = await r.json();
+    if (state.page_version && state.page_version !== PAGE_VERSION) { location.reload(); return; }  // the farm page was updated
+    render();
   } catch (e) { document.getElementById("updated").textContent = "Lost contact with the farm. Retrying…"; }
 }
 async function openDetail(name) {
