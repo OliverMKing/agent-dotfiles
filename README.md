@@ -90,7 +90,7 @@ The service runs `agentctl watch`. The watcher listens for the herdr `workspace_
 - Animals can start their own animals for a separable part of their task. `agentctl` enforces these rules:
   - an animal starts only animals, never a farmer;
   - a read-only animal (dog or goose) starts only read-only animals;
-  - each agent has at most 3 live children, and the tree has at most 4 levels (lead farmer, farmer, and two levels of animals below it); the `limits` section of `models.json` sets these numbers;
+  - each agent has at most 3 live children, and the tree goes at most 4 levels below the lead farmer (the farmer, then up to three levels of animals); the `limits` section of `models.json` sets these numbers;
   - an animal cannot send its final report while its own animals still run.
   A sandboxed animal that cannot write the state files puts a spawn request in its output directory, and the watcher starts the child for it with the same checks. On the farm page, nested animals stand in the plot of their farmer, marked with "↳".
 - Workers, reviewers and researchers are single-use. A child sends its last report with `agentctl report --final`. After the watcher delivers that report, it marks the child done and closes its pane. A sandboxed agent that cannot write the inbox writes `outbox.jsonl` in its output directory instead, and the watcher moves the messages from there. A parent never sends a second task to a finished child. It starts a new one and gives it the earlier output.
