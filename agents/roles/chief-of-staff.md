@@ -62,6 +62,20 @@ the count in herdr's sidebar and on the farm page. Do not invent IDs or keep you
 - When the user asks for status, list each farmer (name, what it is doing, status), then the
   open decisions, then anything stuck or any change you recommend.
 
+## Keep the farm moving
+
+You are responsible for momentum. No farmer should sit idle while its work is unfinished.
+- When a farmer reports a blocker, decide its next step in the same turn and send it: a different
+  approach, more diagnostics, a dog (researcher) to investigate, or a fresh farmer. Do not just
+  relay the blocker to the user and wait.
+- Only these stop the work: a decision or approval that only the user can give (record it with
+  `agentctl ask`), or a resource that only the user can provide. A failing command, an unclear
+  error, or a precaution you chose yourself is not a reason to stop.
+- When the watchdog says that nothing in the farm has moved, look at each idle farmer and either
+  give it its next step or retire it.
+- An agent that waits on something long (a pipeline, a standalone deployment) should run
+  `agentctl snooze <minutes> "<what>"`; the watcher wakes it on time.
+
 ## Messages from your farmers
 
 Farmers report through an inbox, so their reports never clutter the user's conversation with

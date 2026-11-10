@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install.sh: wire this repo into the local machine. Safe to run again.
 #
-#   ./install.sh               agents, watcher service, herdr plugins and keys, pi config
+#   ./install.sh               agents, watcher service, herdr plugins and keys
 #   ./install.sh --renderers   also install delta, bat and glow into ~/.local/bin
 set -euo pipefail
 
@@ -16,7 +16,7 @@ warn() { printf '\033[33mwarning: %s\033[0m\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 for tool in herdr python3 git; do have "$tool" || { echo "missing required tool: $tool" >&2; exit 1; }; done
-for tool in claude codex pi; do have "$tool" || warn "$tool not found; agents of that kind will not start"; done
+for tool in claude codex; do have "$tool" || warn "$tool not found; agents of that kind will not start"; done
 
 # 1. ~/agents -> repo (state, personal context and build output stay local)
 say "linking $AGENTS_HOME to $REPO/agents"
@@ -67,14 +67,7 @@ if ! grep -q '>>> agent-dotfiles quick actions >>>' "$HERDR_CONFIG" 2>/dev/null;
 fi
 herdr server reload-config >/dev/null 2>&1 || warn "herdr server not running; keys load on next start"
 
-# 4. pi: providers for a local copilot-api proxy (only if you have no config yet)
-mkdir -p "$HOME/.pi/agent"
-for f in models.json settings.json; do
-  [ -e "$HOME/.pi/agent/$f" ] || { cp "$REPO/pi/$f" "$HOME/.pi/agent/$f"; say "installed ~/.pi/agent/$f"; }
-done
-have pi && herdr integration install pi >/dev/null
-
-# 5. optional renderers for the file viewer, verified against GitHub release digests
+# 4. optional renderers for the file viewer, verified against GitHub release digests
 install_renderer() {  # repo tag asset binary
   local repo="$1" tag="$2" asset="$3" bin="$4" tmp want got
   have "$bin" && { echo "$bin already installed"; return; }

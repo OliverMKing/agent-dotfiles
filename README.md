@@ -11,13 +11,12 @@ This repository holds a farm-flavored multi-agent setup for [herdr](https://herd
 | Goose | Reviewer that checks a change (read-only) | `reviewer` | 🪿 |
 | Specialist animal | A worker, researcher or reviewer with a specialty | the base role | its own species |
 
-In this README, "CoS" and "lead farmer" mean the same agent, and "lead" and "farmer" mean the same agent. Each agent uses Claude Code or Codex at random, with a model that matches the task difficulty. The repository also adds herdr quick actions to open VS Code and to review code changes with a file viewer and the pi coding agent.
+In this README, "CoS" and "lead farmer" mean the same agent, and "lead" and "farmer" mean the same agent. Each agent uses Claude Code or Codex at random, with a model that matches the task difficulty. The repository also adds herdr quick actions to open VS Code and to review code changes with a file viewer and a read-only reviewer agent.
 
 ## Requirements
 
 - herdr 0.9 or later, Python 3.10 or later, and git.
 - Claude Code (`claude`), Codex (`codex`), or both. The default model table expects a [copilot-api](https://github.com/caozhiyuan/copilot-api) proxy on `localhost:4141`.
-- pi (`npm install -g @earendil-works/pi-coding-agent`) for the review action.
 - The GitHub CLI (`gh`), only if you use `install.sh --renderers`.
 
 ## Install
@@ -33,7 +32,6 @@ The install script does these steps:
 - It installs and starts the `herdr-space-cos` systemd user service.
 - It links the quick-actions plugin and installs the [herdr-file-viewer](https://github.com/smarzban/herdr-file-viewer) plugin at a reviewed commit.
 - It adds the key bindings from `herdr/keys.toml` to your herdr config one time, after a backup.
-- It copies the pi provider config to `~/.pi/agent/` if you do not have one, and it installs the herdr pi integration.
 
 ## The farm page
 
@@ -131,6 +129,12 @@ The watcher also follows every agent that `spawn` starts. `spawn` records each c
 
 If a chief of staff exits, or a parent cannot get the note, the watchdog shows a herdr notification to you.
 
+### Keeping work moving
+
+Agents are told not to stop at "the next step would be X" when X is within their charter. An error that they do not understand yet is a reason to investigate, not a blocker. Only something that only you can give, such as an approval, a decision or a secret, stops the work.
+
+The watcher also checks each farm every minute. If no agent works and nothing waits on you or in an inbox for 15 minutes while farmers are still assigned, it tells the lead farmer to give each idle farmer its next step or to retire it. An agent that waits on something long, such as a pipeline or a standalone deployment, runs `agentctl snooze <minutes> "<what>"`. The watcher does not count it as stalled, and it wakes the agent at that time to check again.
+
 ### Context size
 
 Large contexts make every turn slower and more expensive, and they lower quality. The watcher reads the token use of each agent from its own transcript. For Claude, it reads `~/.claude/projects/*/<session>.jsonl`. For Codex, it reads `~/.codex/sessions/**/<session>.jsonl`. It then acts in this order:
@@ -183,9 +187,9 @@ Agents never answer a folder-trust dialog. Folder trust is separate for Claude a
 | `prefix+shift+v` | Open the git root of the focused pane in VS Code |
 | `prefix+f` | Open the file viewer in a split |
 | `prefix+shift+f` | Open the file viewer in a tab |
-| `prefix+alt+r` | Review changes: open a tab with the file viewer and a pi reviewer |
+| `prefix+alt+r` | Review changes: open a tab with the file viewer and a read-only reviewer |
 
-The review action writes the diff against the merge base with the default branch to a file. The diff includes committed and uncommitted changes, and the file lists untracked files. Then the action starts pi with read-only tools (`read`, `grep`, `find` and `ls`) and asks it for a summary and findings. To send notes to pi, mark lines in the file viewer with `a`, copy them with `A` and then `y`, and paste them into the pi pane.
+The review action writes the diff against the merge base with the default branch to a file. The diff includes committed and uncommitted changes, and the file lists untracked files. Then the action starts a reviewer next to the file viewer and asks it for a summary and findings. The reviewer is Claude in plan mode or Codex in its read-only sandbox, chosen at random, so it cannot change anything. To send notes to the reviewer, mark lines in the file viewer with `a`, copy them with `A` and then `y`, and paste them into the reviewer pane.
 
 ## Commands
 
@@ -202,6 +206,7 @@ The review action writes the diff against the merge base with the default branch
 | `agentctl decisions` | Print the open decisions |
 | `agentctl specialties` | List specialist animals |
 | `agentctl farm` | Serve the farm page (the `herdr-farm` service runs it) |
+| `agentctl snooze <minutes> "<what>"` | Wait on something long; the watcher wakes the agent at that time |
 | `agentctl tidy` | Remove leftovers of finished agents, trim logs, delete archived farms older than 14 days, and move each lead farmer tab first (the watcher also runs this daily) |
 | `agentctl ls` | List the agents in the current space |
 | `agentctl resume <agent> <session-id>` | Start an agent again with its full settings (herdr runs this after a restart) |
@@ -218,7 +223,6 @@ The review action writes the diff against the merge base with the default branch
 | `agents/settings.json` | Deny rules for Claude agents |
 | `herdr/quick-actions/` | The herdr plugin for the VS Code and review actions |
 | `herdr/keys.toml` | Key bindings that `install.sh` adds to your herdr config |
-| `pi/` | pi providers for the copilot-api proxy |
 | `agents/farm/index.html` | The farm page |
 | `systemd/` | The watcher service and the farm service |
 | `install.sh` | The install script |

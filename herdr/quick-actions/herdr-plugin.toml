@@ -2,7 +2,7 @@ id = "agent-dotfiles.quick-actions"
 name = "Quick actions"
 version = "0.1.0"
 min_herdr_version = "0.9.0"
-description = "Quick actions: open in VS Code; review changes with the file viewer and pi."
+description = "Quick actions: open in VS Code; review changes with the file viewer and a read-only reviewer."
 platforms = ["linux"]
 
 [[actions]]
@@ -14,7 +14,7 @@ command = ["python3", "-I", "open_vscode.py"]
 
 [[actions]]
 id = "review-changes"
-title = "Review changes (file viewer + pi)"
-description = "New tab: file viewer on the repo's changes, plus a read-only pi agent reviewing the diff."
+title = "Review changes (file viewer + reviewer)"
+description = "New tab: file viewer on the repo's changes, plus a read-only Claude or Codex agent reviewing the diff."
 contexts = ["workspace"]
 command = ["python3", "-I", "review_changes.py"]

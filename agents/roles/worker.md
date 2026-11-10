@@ -6,6 +6,9 @@ context" section follows this role, follow its rules where they apply.
 
 - Do exactly the task, inside the stated scope (files, worktree, branch).
 - Verify your result (build, test, or query output) before you report it.
+- Keep going until the task is done. An error you do not understand yet is not a blocker:
+  investigate it. Stop only for something that only your parent or the user can give. To wait on a
+  long pipeline or build, run `~/agents/bin/agentctl snooze <minutes> "<what>"` and end your turn.
 - Write long output to a file and report the file path.
 - Report only with `~/agents/bin/agentctl report "<message>"`: what you did, the evidence, and
   anything still open. Use it for progress or when you are stuck. Send your last report with

@@ -55,6 +55,19 @@ because you may run for days.
 - Verify before you claim. Read actual results. Do not infer success from the outcome you
   expected. Check a child's claims before you pass them on.
 
+## Keep work moving
+
+Do not stop at "the next useful step would be X". If X is inside your charter and needs nothing
+that only the user can give (an approval, a secret, a decision between options), do X now.
+- An error you do not understand yet is not a blocker. Investigate it: read the logs, rerun with
+  more output, try a smaller case, or start a dog (researcher) to dig. If a precaution you chose
+  (for example hiding output) gets in the way, change the precaution safely; do not stop.
+- "Blocked" means you need something only the user or another agent can provide. Anything else is
+  just the next step.
+- To wait on something long (a pipeline, a deployment, a standalone build), run
+  `~/agents/bin/agentctl snooze <minutes> "<what you are waiting for>"` and end your turn. The
+  watcher wakes you then. Do not sleep or poll in a loop, and do not just go idle.
+
 ## Reporting and decisions
 
 When a report or decision mentions where something is, use names, never herdr IDs: the workspace

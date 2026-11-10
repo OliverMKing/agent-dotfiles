@@ -1,4 +1,4 @@
-"""Open a 'review' tab: file viewer on the changes (left) + a read-only pi reviewer (right)."""
+"""Open a 'review' tab: file viewer on the changes (left) + a read-only Claude or Codex reviewer (right)."""
 import os
 import random
 import re
@@ -7,11 +7,15 @@ import sys
 import time
 
 sys.path.insert(0, ".")
-from common import focused_root, git, herdr, notify  # noqa: E402
+from common import HERDR, focused_root, git, herdr, notify  # noqa: E402
 
-# Standard tier, random vendor (matches ~/agents/models.json "standard").
-PI_MODELS = ["copilot-claude/claude-sonnet-5-5", "copilot-openai/gpt-6.1-terra"]
-PI_TOOLS = "read,grep,find,ls"  # read-only: pi has no permission prompts
+# Standard tier, random vendor (matches ~/agents/models.json "standard"). Both run read-only:
+# Claude in plan mode (no edits or changing commands), Codex in its read-only sandbox.
+REVIEWERS = {
+    "claude": ["--model", "sonnet", "--effort", "high", "--permission-mode", "plan"],
+    "codex": ["--no-daemon", "-m", "gpt-6.1-terra", "-c", 'model_reasoning_effort="high"', "-s", "read-only",
+              "-a", "never", "-c", "check_for_update_on_startup=false"],
+}
 
 _, wid, root = focused_root()
 if not git(root, "rev-parse", "--git-dir"):
@@ -53,26 +57,39 @@ tab = herdr("pane", "get", viewer)["pane"]["tab_id"]
 herdr("tab", "rename", tab, re.sub(r"[^A-Za-z0-9._-]", "-", f"review-{repo}")[:32])
 herdr("pane", "rename", viewer, "files")
 
-# 2. pi beside it, read-only, asked to review.
-pi_pane = herdr("pane", "split", viewer, "--direction", "right", "--cwd", root, "--no-focus")["pane"]["pane_id"]
-herdr("pane", "rename", pi_pane, "pi review")
-model = random.choice(PI_MODELS)
+# 2. a read-only reviewer beside it, asked to review.
+review_pane = herdr("pane", "split", viewer, "--direction", "right", "--cwd", root, "--no-focus")["pane"]["pane_id"]
+herdr("pane", "rename", review_pane, "reviewer")
+vendor = os.environ.get("REVIEW_VENDOR") or random.choice(list(REVIEWERS))  # override for tests
 name = f"review-{wid.lower()}-{stamp[-6:]}"
 try:
-    herdr("agent", "start", name, "--kind", "pi", "--pane", pi_pane, "--timeout", "60000",
-          "--", "--model", model, "--thinking", "medium", "--tools", PI_TOOLS)
+    herdr("agent", "start", name, "--kind", vendor, "--pane", review_pane, "--timeout", "60000",
+          "--", *REVIEWERS[vendor])
 except RuntimeError as e:
-    notify("Review changes", f"pi did not start: {e}")
-    sys.exit(1)
+    if "agent_not_ready" not in str(e):
+        notify("Review changes", f"the {vendor} reviewer did not start: {e}")
+        sys.exit(1)
+    # still starting, or waiting on a folder-trust dialog: give the user up to 3 minutes to answer it
+    notify("Review changes", "If the reviewer pane asks whether to trust this folder, answer it there.")
+    try:
+        herdr("agent", "wait", name, "--until", "idle", "--until", "done", "--timeout", "180000")
+    except RuntimeError:
+        notify("Review changes", "The reviewer never became ready.")
+        sys.exit(1)
 
-herdr("agent", "prompt", name, f"""Review the code changes in {root} (branch {branch}).
+prompt_text = f"""Review the code changes in {root} (branch {branch}).
 The full diff against {default} (merge-base {base[:12]}) is in {diff_path}; read it first.
 Untracked files are listed at the end of that file; read them directly if relevant.
 
 1. Summary: what changed, grouped by file or feature, in a few lines.
 2. Findings, most severe first, each with file:line, the concrete failure, and a suggested fix:
    correctness bugs, risky or surprising changes, missing or weak tests, then minor issues.
-Skip style nits. You are read-only: do not try to modify anything.
-Then wait. The user may paste notes from the file viewer (lines marked with `a`, copied with `A` then `y`).""")
-notify("Review changes", f"{repo}: {model.split('/')[1]} reviewing vs {default}")
-print(name, model, diff_path)
+Skip style nits. You are read-only: do not modify anything.
+Then wait. The user may paste notes from the file viewer (lines marked with `a`, copied with `A` then `y`)."""
+herdr("agent", "prompt", name, prompt_text)
+# a long pasted prompt can stay unsent in the input box: if the reviewer did not start, press Enter
+time.sleep(4)
+if herdr("agent", "get", name)["agent"]["agent_status"] not in ("working", "blocked"):
+    subprocess.run([HERDR, "agent", "send-keys", name, "enter"], capture_output=True)
+notify("Review changes", f"{repo}: {vendor} reviewing vs {default}")
+print(name, vendor, diff_path)

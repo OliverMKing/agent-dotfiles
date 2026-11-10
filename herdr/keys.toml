@@ -9,7 +9,7 @@ description = "open in VS Code"
 key = "prefix+alt+r"
 type = "plugin_action"
 command = "agent-dotfiles.quick-actions.review-changes"
-description = "review changes (file viewer + pi)"
+description = "review changes (file viewer + reviewer)"
 
 [[keys.command]]
 key = "prefix+f"

@@ -1473,6 +1473,70 @@ def cmd_tidy(a):
     tidy(verbose=True)
 
 
+def cmd_snooze(a):
+    """An agent declares it is waiting on something; the watcher wakes it when the time is up and
+    does not count it as stalled meanwhile."""
+    me = os.environ.get("AGENT_NAME") or my_name()
+    entry = next((e for e in reg_all() if e.get("name") == me), None)
+    if not entry:
+        raise SystemExit(f"{me} is not a registered agent")
+    until = time.time() + a.minutes * 60
+    reg_update(entry["workspace_id"], me, waiting_until=until, waiting_for=a.what, woken=False)
+    print(json.dumps({"agent": me, "wake_at": time.strftime("%H:%M", time.localtime(until)), "waiting_for": a.what}))
+
+
+STALL_AFTER = 15 * 60  # s with nothing moving in a farm before its lead farmer is told
+
+
+def stall_loop():
+    """Catch farms where everyone is idle although work remains, and wake snoozed agents on time."""
+    idle_since, nudged = {}, {}
+    while True:
+        try:
+            now = time.time()
+            reg = [e for e in reg_all() if e.get("state") == "running"]
+            live = {a.get("name"): a for a in herdr("agent", "list", check=False).get("agents", []) if a.get("name")}
+            # 1. wake agents whose snooze is over
+            for e in reg:
+                if e.get("waiting_until") and now >= e["waiting_until"] and not e.get("woken") and e["name"] in live:
+                    reg_update(e["workspace_id"], e["name"], woken=True)
+                    enqueue(e["name"], f"[watch] Time to check again: {e.get('waiting_for', 'what you were waiting for')}. "
+                                       "Check it now and continue, or snooze again if it is still running.", "watchdog")
+            # 2. stalled farms
+            for wid in {e["workspace_id"] for e in reg}:
+                here = [e for e in reg if e["workspace_id"] == wid and e["name"] in live]
+                lf = next((e for e in here if e.get("role") == "chief-of-staff"), None)
+                workers = [e for e in here if e.get("role") != "chief-of-staff"]
+                if not lf or not workers:
+                    idle_since.pop(wid, None)
+                    continue
+                busy = any(live[e["name"]]["agent_status"] in ("working", "blocked") for e in here)
+                waiting_msgs = any(os.path.exists(os.path.join(INBOX, f"{e['name']}{ext}")) and
+                                   os.path.getsize(os.path.join(INBOX, f"{e['name']}{ext}")) > 0
+                                   for e in here for ext in (".jsonl", ".unread"))
+                open_decisions = any(i["status"] == "open" for i in load_decisions(wid)["items"])
+                snoozed = [e for e in workers if (e.get("waiting_until") or 0) > now]
+                if busy or waiting_msgs or open_decisions or len(snoozed) == len(workers):
+                    idle_since.pop(wid, None)
+                    nudged.pop(wid, None)
+                    continue
+                idle_since.setdefault(wid, now)
+                if now - idle_since[wid] >= STALL_AFTER and not nudged.get(wid):
+                    nudged[wid] = True
+                    idle = [e for e in workers if e not in snoozed]
+                    lines = "; ".join(f"{e['name']} ({e.get('title', '')}), last report: "
+                                      f"{(e.get('last_report_text') or 'none')[:120]}" for e in idle[:5])
+                    enqueue(lf["name"], f"[watch] Nothing in this farm has moved for {int((now - idle_since[wid]) / 60)} "
+                                        f"minutes and nothing is waiting on the user. Idle: {lines}. Unless their work "
+                                        "is done, give each one its next step now (a blocker you can investigate is not "
+                                        "a reason to stop); retire the ones that are done. An agent that is waiting on "
+                                        "something long should run `agentctl snooze <minutes> \"<what>\"`.", "watchdog")
+                    log(f"stall {wid}: nudged {lf['name']} ({len(idle)} idle)")
+        except Exception as err:  # noqa: BLE001
+            log("stall:", err)
+        time.sleep(60)
+
+
 def cmd_ls(a):
     wid = a.workspace or os.environ.get("HERDR_WORKSPACE_ID")
     rows = [x for x in herdr("agent", "list")["agents"] if not wid or x["workspace_id"] == wid]
@@ -2215,6 +2279,7 @@ def cmd_watch(a):
     threading.Thread(target=watchdog_loop, daemon=True).start()
     threading.Thread(target=deliver_loop, daemon=True).start()
     threading.Thread(target=tidy_loop, daemon=True).start()
+    threading.Thread(target=stall_loop, daemon=True).start()
     seen = set()
     while True:
         try:
@@ -2327,6 +2392,9 @@ def main():
     x.set_defaults(f=cmd_resolve)
     x = s.add_parser("decisions", help="print open decisions (the Needs you block)")
     x.add_argument("--all", action="store_true"); x.set_defaults(f=cmd_decisions)
+    x = s.add_parser("snooze", help="wait on something long; the watcher wakes you after MINUTES")
+    x.add_argument("minutes", type=int); x.add_argument("what", help="what you are waiting for")
+    x.set_defaults(f=cmd_snooze)
     x = s.add_parser("tidy", help="clean up leftovers of finished agents and old archived farms")
     x.set_defaults(f=cmd_tidy)
     x = s.add_parser("farm", help="serve the live farm view (http://127.0.0.1:8787)")
