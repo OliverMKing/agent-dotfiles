@@ -64,5 +64,10 @@
     "_comment": "Animals may start animals. depth: lead farmer 0, farmer 1, its animals 2, and so on.",
     "max_depth": 4,
     "max_live_children": 3
+  },
+  "permissions": {
+    "_comment": "How much freedom agents get. 'open' lets farmers, horses and lead farmers do real work (cloud test environments, builds, kubectl) without sandbox or approval prompts; deny rules (merges, force pushes, protected branches, setup edits) still apply to Claude agents. Dogs and geese stay read-only. Set mode to 'guarded' for the old sandboxed behavior.",
+    "mode": "open",
+    "claude_mode": "bypassPermissions"
   }
 }

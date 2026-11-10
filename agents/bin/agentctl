@@ -238,6 +238,7 @@ def guarded_settings():
     """Base settings plus: no agent may edit the agent setup itself (this repo: agentctl, roles, ...)."""
     cfg = json.load(open(SETTINGS))
     cfg.setdefault("permissions", {}).setdefault("deny", []).extend(setup_denies())
+    cfg["skipDangerousModePermissionPrompt"] = True  # agents start unattended; bypass mode is chosen in models.json
     os.makedirs(BUILD, exist_ok=True)
     path = os.path.join(BUILD, "settings-guarded.json")
     with open(path, "w") as f:
@@ -245,10 +246,16 @@ def guarded_settings():
     return path
 
 
+def permission_cfg():
+    return json.load(open(MODELS)).get("permissions", {"mode": "guarded"})
+
+
 def agent_args(role, choice, cwd=None, outdir=None, specialty=None):
     read_only = role in READ_ONLY_ROLES
+    open_mode = not read_only and permission_cfg().get("mode") == "open"
     if choice["vendor"] == "claude":
-        a = ["--model", choice["model"], "--effort", choice["effort"], "--permission-mode", "auto",
+        mode = permission_cfg().get("claude_mode", "bypassPermissions") if open_mode else "auto"
+        a = ["--model", choice["model"], "--effort", choice["effort"], "--permission-mode", mode,
              "--settings", guarded_settings(), "--append-system-prompt-file", role_file(role, specialty)]
         if read_only:
             # Hard confinement: per-agent settings deny edits to the repo (also covers Bash
@@ -290,7 +297,32 @@ def agent_args(role, choice, cwd=None, outdir=None, specialty=None):
                 "--add-dir", INBOX, "--add-dir", space_agents,
                 "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
                 "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]
+    if open_mode:
+        # full access: cloud CLIs, kube configs, build caches and /tmp all work without escalations
+        return [*common, *trust, "-s", "danger-full-access", "-a", "never"]
     return [*common, *trust, "--approve-for-me", "--add-dir", AGENTS, *extra_dirs()]
+
+
+def herdr_api(method, params):
+    """One raw socket request, for API methods the CLI does not expose (for example tab.move)."""
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(10)
+    try:
+        s.connect(SOCK)
+        s.sendall((json.dumps({"id": f"agentctl-{method}", "method": method, "params": params}) + "\n").encode())
+        return json.loads(s.makefile().readline() or "{}")
+    except (OSError, ValueError) as err:
+        return {"error": str(err)}
+    finally:
+        s.close()
+
+
+def lead_farmer_tab_first(wid):
+    lf = agent_by_name(cos_name(wid)) or agent_by_name(f"cos-{wid.lower()}")
+    if lf:
+        tabs = herdr("tab", "list", "--workspace", wid, check=False).get("tabs", [])
+        if tabs and tabs[0]["tab_id"] != lf["tab_id"]:
+            herdr_api("tab.move", {"tab_id": lf["tab_id"], "insert_index": 0})
 
 
 def where(pane_id, with_workspace=True):
@@ -400,6 +432,7 @@ def start_cos(wid, wait_trust_ms=900000):
     with open(os.path.join(sdir, "space.json"), "r+") as f:
         meta = json.load(f); meta["cos_model"] = choice; f.seek(0); json.dump(meta, f, indent=1); f.truncate()
     log(f"{name}: {choice['vendor']} {choice['model']} ({choice['effort']})")
+    lead_farmer_tab_first(wid)
     reg_update(wid, name, name=name, parent=None, role="chief-of-staff", title=COS_LABEL, pane=pane["pane_id"],
                cwd=pane.get("cwd"), model=choice, started=time.time(), last_report=0, state="running")
     if state == "blocked":
@@ -1386,6 +1419,60 @@ def cmd_specialties(a):
               f"{m.get('description', '')}")
 
 
+def tidy(verbose=False):
+    """Housekeeping: remove leftovers of agents that are gone, trim logs, drop old archived farms,
+    and keep every lead farmer's tab first."""
+    import shutil
+    live = {a.get("name") for a in herdr("agent", "list", check=False).get("agents", []) if a.get("name")}
+    done = []
+    # generated per-agent settings / specialty role files of agents that are gone
+    if os.path.isdir(BUILD):
+        for f in os.listdir(BUILD):
+            m = re.match(r"settings-(.+)\.json$", f)
+            if m and m.group(1) != "guarded" and m.group(1) not in live:
+                os.remove(os.path.join(BUILD, f)); done.append(f".build/{f}")
+    # inbox: drop files of departed agents (once delivered), trim history logs
+    if os.path.isdir(INBOX):
+        for f in os.listdir(INBOX):
+            path = os.path.join(INBOX, f)
+            agent = re.sub(r"\.(jsonl|unread|nudged|read|sent\.jsonl|farm\.jsonl)$", "", f)
+            old = time.time() - os.path.getmtime(path) > 7 * 86400
+            if agent not in live and (old or os.path.getsize(path) == 0) and not f.endswith(".unread"):
+                os.remove(path); done.append(f"inbox/{f}")
+            elif f.endswith((".read", ".sent.jsonl", ".farm.jsonl")):
+                lines = open(path).read().splitlines()
+                if len(lines) > 500:
+                    open(path, "w").write("\n".join(lines[-500:]) + "\n"); done.append(f"inbox/{f} trimmed")
+    # archived farms older than 14 days
+    closed = os.path.join(SPACES, "_closed")
+    if os.path.isdir(closed):
+        for d in os.listdir(closed):
+            path = os.path.join(closed, d)
+            if time.time() - os.path.getmtime(path) > 14 * 86400:
+                shutil.rmtree(path, ignore_errors=True); done.append(f"spaces/_closed/{d}")
+    # lead farmer tabs first
+    for w in herdr("workspace", "list", check=False).get("workspaces", []):
+        lead_farmer_tab_first(w["workspace_id"])
+    if verbose:
+        print("\n".join(done) if done else "nothing to tidy")
+    return done
+
+
+def tidy_loop():
+    time.sleep(120)
+    while True:
+        try:
+            n = len(tidy())
+            log(f"tidy: {n} item(s) cleaned")
+        except Exception as err:  # noqa: BLE001
+            log("tidy:", err)
+        time.sleep(86400)
+
+
+def cmd_tidy(a):
+    tidy(verbose=True)
+
+
 def cmd_ls(a):
     wid = a.workspace or os.environ.get("HERDR_WORKSPACE_ID")
     rows = [x for x in herdr("agent", "list")["agents"] if not wid or x["workspace_id"] == wid]
@@ -1490,6 +1577,33 @@ def enqueue(recipient, text, sender, final=False, space=None):
         with open(os.path.join(outdir, "outbox.jsonl"), "a") as f:
             f.write(line)
         return "outbox"
+
+
+def running_ancestor(agent):
+    """The nearest running agent above a stopped one (its parent, grandparent, ...)."""
+    reg = {e.get("name"): e for e in reg_all() if e.get("name")}
+    e, seen = reg.get(agent), set()
+    if not e or e.get("state") in ("running", "starting", "pending"):
+        return None  # unknown, or not stopped yet (it may just be restarting)
+    while e and e.get("parent") and e["parent"] not in seen:
+        seen.add(e["parent"])
+        if agent_by_name(e["parent"]):
+            return e["parent"]
+        e = reg.get(e["parent"])
+    return None
+
+
+def adopt_orphans(stopped):
+    """Give the running animals of a stopped agent to its nearest running ancestor."""
+    heir = running_ancestor(stopped)
+    if not heir:
+        return
+    for e in reg_all():
+        if e.get("parent") == stopped and e.get("state") in ("running", "starting", "pending"):
+            reg_update(e["workspace_id"], e["name"], parent=heir, orphaned_from=stopped)
+            enqueue(heir, f"[watch] {stopped} stopped; its animal {e['name']} ({e.get('title', '')}) now reports to "
+                          f"you. Its reports will arrive marked as forwarded. Take it over or retire it.", "watchdog")
+            log(f"orphan {e['name']}: parent {stopped} stopped; now under {heir}")
 
 
 def is_lead_farmer(agent):
@@ -1657,6 +1771,15 @@ def deliver_loop():
                 live = agent_by_name(agent)
                 oldest = time.time() - msgs[0]["ts"]
                 if not live:
+                    heir = running_ancestor(agent)
+                    if heir:
+                        # the recipient stopped (retired or refreshed): pass its mail up instead of stranding it
+                        os.remove(path)
+                        for m in msgs:
+                            enqueue(heir, f"[forwarded: {agent} is no longer running] {m['text']}", m.get("from", "?"),
+                                    final=m.get("final", False), space=m.get("space"))
+                        log(f"deliver {agent}: not running; forwarded {len(msgs)} message(s) to {heir}")
+                        continue
                     if oldest > DRAFT_NAG_AFTER and nagged.get(agent) != len(msgs):
                         nagged[agent] = len(msgs)
                         herdr("notification", "show", f"{len(msgs)} undelivered message(s) for {agent}",
@@ -1939,6 +2062,9 @@ class ChildWatch(threading.Thread):
     def check_context(self, status, at):
         """Compact an idle agent whose context got large; after repeated compactions, refresh it."""
         e, now = self.e, time.time()
+        if not os.path.exists(reg_path(e["workspace_id"], e["name"])):
+            self.stop = True  # its farm was closed and archived
+            return
         if status not in ("idle", "done") or now - at < 15 or now - self.last_ctx_check < 60:
             return
         self.last_ctx_check = now
@@ -1995,6 +2121,7 @@ open "Needs you" items.""")
             self.last_alive_check = now
             if not agent_by_name(e["name"]):  # agent process ended (pane is back at a shell) or pane gone
                 reg_update(e["workspace_id"], e["name"], state="exited", ended=now)
+                adopt_orphans(e["name"])
                 self.stop = True
                 panes = {p["pane_id"] for p in herdr("pane", "list", check=False).get("panes", [])}
                 if e["pane"] in panes:  # pane still there: the agent died, it was not retired
@@ -2067,6 +2194,7 @@ def on_pane_gone(pane_id, exited):
     for e in reg_all():
         if e.get("pane") == pane_id and e.get("state") == "running":
             reg_update(e["workspace_id"], e["name"], state="exited" if exited else "closed", ended=time.time())
+            adopt_orphans(e["name"])
             if exited:
                 threading.Thread(target=tell, daemon=True, args=(
                     e["parent"], f"{e['name']} ({e.get('title', '')}) exited; its pane is now a shell. "
@@ -2086,6 +2214,7 @@ def on_pane_gone(pane_id, exited):
 def cmd_watch(a):
     threading.Thread(target=watchdog_loop, daemon=True).start()
     threading.Thread(target=deliver_loop, daemon=True).start()
+    threading.Thread(target=tidy_loop, daemon=True).start()
     seen = set()
     while True:
         try:
@@ -2198,6 +2327,8 @@ def main():
     x.set_defaults(f=cmd_resolve)
     x = s.add_parser("decisions", help="print open decisions (the Needs you block)")
     x.add_argument("--all", action="store_true"); x.set_defaults(f=cmd_decisions)
+    x = s.add_parser("tidy", help="clean up leftovers of finished agents and old archived farms")
+    x.set_defaults(f=cmd_tidy)
     x = s.add_parser("farm", help="serve the live farm view (http://127.0.0.1:8787)")
     x.add_argument("--port", type=int, default=8787); x.set_defaults(f=cmd_farm)
     x = s.add_parser("inbox", help="(lead farmer) read unread reports and mark them read")

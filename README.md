@@ -93,6 +93,7 @@ The service runs `agentctl watch`. The watcher listens for the herdr `workspace_
   - each agent has at most 3 live children, and the tree goes at most 4 levels below the lead farmer (the farmer, then up to three levels of animals); the `limits` section of `models.json` sets these numbers;
   - an animal cannot send its final report while its own animals still run.
   A sandboxed animal that cannot write the state files puts a spawn request in its output directory, and the watcher starts the child for it with the same checks. On the farm page, nested animals stand in the plot of their farmer, marked with "↳".
+- When an agent stops (for example a farmer that is retired or refreshed), its running animals move to the nearest running agent above it, usually the lead farmer. Messages to the stopped agent are forwarded there, marked "forwarded", so they are never stranded.
 - Workers, reviewers and researchers are single-use. A child sends its last report with `agentctl report --final`. After the watcher delivers that report, it marks the child done and closes its pane. A sandboxed agent that cannot write the inbox writes `outbox.jsonl` in its output directory instead, and the watcher moves the messages from there. A parent never sends a second task to a finished child. It starts a new one and gives it the earlier output.
 - A lead owns its area. It plans, delegates, integrates and verifies. It does small tasks itself and gives longer, parallel or context-heavy tasks to fresh children. Only one agent edits a worktree at a time.
 - The CoS refreshes a lead at a new phase, after a major milestone, or when the context of the lead is more than about 60% full. The old lead writes `handoff.md`, and a new lead starts from it.
@@ -163,15 +164,17 @@ After a restart, herdr runs this command in the restored pane. `agentctl resume`
 
 If one vendor does not start, `agentctl` tries the other vendor.
 
-### Safety
+### Permissions
 
-- Claude agents use auto permission mode and the deny rules in `agents/settings.json`. These rules block merges, force pushes, pushes to `main` or `master`, and herdr server and workspace control.
-- Codex agents use `--approve-for-me`, which is automatic approval review. Codex does not read the Claude deny rules. The role prompts and the automatic review protect Codex agents.
-- Researchers and reviewers cannot write outside their output directory:
-  - A Codex researcher or reviewer runs in a workspace-write sandbox whose only writable root is the output directory. `/tmp` is excluded, and approvals are never granted.
-  - A Claude researcher or reviewer gets its own settings file. That file denies edits to the repo, which also covers shell redirects and file commands, and it sets `blockWritesOutsideWorkingDirectories`. The output directory is the only other working directory.
-- Agents never answer a folder-trust or permission dialog. When a dialog appears, the CoS asks you to answer it.
-- Folder trust is separate for Claude and Codex. If Claude trusts a folder, a Codex agent gets a trust override for that session only. If only Codex trusts a folder, the agent uses Codex.
+`models.json` has a `permissions` section. In the default `open` mode, lead farmers, farmers and horses do real work without sandbox or approval prompts. They can build, run tests, use cloud CLIs, use `kubectl`, and create test environments:
+
+- Claude agents run in `bypassPermissions` mode. The deny rules still apply: no merges, no force pushes, no pushes to `main`, `master` or release branches, and no edits to the agent setup itself.
+- Codex agents run with full access (`danger-full-access`, no approvals). Codex does not read the Claude deny rules, so the role prompts carry those rules for Codex.
+- Dogs and geese (researchers and reviewers) stay read-only. Each one can write only its own output directory.
+
+Set `"mode": "guarded"` to go back to the sandboxed behavior: Claude auto mode, and Codex with automatic approval review.
+
+Agents never answer a folder-trust dialog. Folder trust is separate for Claude and Codex. If Claude trusts a folder or the main repository of a worktree, a Codex agent gets a trust override for that session only.
 
 ## Quick actions
 
@@ -199,6 +202,7 @@ The review action writes the diff against the merge base with the default branch
 | `agentctl decisions` | Print the open decisions |
 | `agentctl specialties` | List specialist animals |
 | `agentctl farm` | Serve the farm page (the `herdr-farm` service runs it) |
+| `agentctl tidy` | Remove leftovers of finished agents, trim logs, delete archived farms older than 14 days, and move each lead farmer tab first (the watcher also runs this daily) |
 | `agentctl ls` | List the agents in the current space |
 | `agentctl resume <agent> <session-id>` | Start an agent again with its full settings (herdr runs this after a restart) |
 | `systemctl --user stop herdr-space-cos` | Stop new spaces from getting a CoS |
