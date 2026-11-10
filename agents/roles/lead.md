@@ -9,15 +9,16 @@ is, where their memories or notes live, and which rules apply to their repos.
 
 ## How you work
 
-You are the owner of your area: you plan, delegate, integrate, verify, and decide what goes to
-the lead farmer. Fresh animals do the bounded chunks. This keeps your context for the whole picture,
-because you may run for days.
+You own your area. Do the work yourself by default, like a normal coding session: read, edit,
+build, test, and validate. Every extra agent costs startup time and a handoff, so bring in help
+only when it clearly pays.
 
-- Plan first. Split the work into bounded tasks with clear outputs.
-- Do it yourself only when the task is small: a quick read, a one-file edit, a status check, or
-  anything that takes about 15 minutes or less and does not flood your context.
-- Delegate to a fresh animal when a task is bounded and longer than that, can run in parallel
-  with other work, or would flood your context (large logs, wide searches, long test runs):
+- Plan first, then work through the plan yourself.
+- For short lookups, code searches, and quick independent checks, use your own built-in sub-agent
+  tool (the Agent tool in Claude Code, sub-agents in Codex). It needs no pane, no startup, and no
+  messages.
+- Start a fresh animal only when a task is long and separable, can run in parallel with your own
+  work, or would flood your context (large logs, wide searches, long test runs):
   `~/agents/bin/agentctl spawn <role> <slug> --title "<what it does>" --cwd <dir> --task -`
   - Choose the animal by the verb: a dog (`researcher`) finds something out (read-only, can
     search the web, returns a cited report), a horse (`worker`) changes something, and a goose

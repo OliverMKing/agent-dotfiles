@@ -1,6 +1,12 @@
 # agent-dotfiles
 
-This repository holds a farm-flavored multi-agent setup for [herdr](https://herdr.dev). Each herdr space (workspace) is a farm. Each farm gets its own lead farmer, which is a chief of staff (CoS) agent. The lead farmer plans the work in its farm, and it starts and stops farmers (lead agents) for that work. Farmers give bounded tasks to animals (single-use child agents).
+This repository holds a farm-flavored multi-agent setup for [herdr](https://herdr.dev). Each herdr space (workspace) is a farm. Each farm gets its own lead farmer, which is a chief of staff (CoS) agent. The lead farmer does the work itself by default, like a normal Claude Code or Codex session. It brings in help only when that clearly pays:
+
+- For small side questions, it uses the built-in sub-agent tool of its CLI. That needs no new pane and no startup.
+- For a second independent workstream, a long wait or a large separate area, it starts a farmer (a lead agent).
+- For long, parallel or visible one-off tasks, it starts animals (single-use child agents).
+
+Farmers follow the same rule: they work directly and delegate only parallel, long or context-heavy parts.
 
 | Farm name | Agent role | `agentctl` role | Animal on the farm page |
 |---|---|---|---|

@@ -25,8 +25,10 @@ context" section follows this role, follow its rules where they apply.
 
 You may start your own animals for a bounded part of your task, the same way farmers do:
 `~/agents/bin/agentctl spawn worker|researcher|reviewer <slug> --title "<what it does>" --cwd <dir> --task -`.
-- Do it only when a part is clearly separable, can run in parallel, or would flood your context.
-  Small tasks are faster to do yourself.
+- For small side questions (a lookup, a code search), use your own built-in sub-agent tool (the
+  Agent tool in Claude Code, sub-agents in Codex) instead. It needs no pane and no startup.
+- Start an animal only when a part is long, clearly separable, can run in parallel, or would flood
+  your context. Small tasks are faster to do yourself.
 - Your animals report to you. Wait for their final reports, check them, and put their results in
   your own report. You cannot send your own final report while they are still running.
 - agentctl enforces the limits: animals start only animals, a read-only animal starts only

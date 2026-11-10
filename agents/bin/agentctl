@@ -1069,7 +1069,10 @@ def message_history(vendor, session_id, name, parent, limit=60):
                 continue
             ts = _ts(d.get("timestamp"))
             if vendor == "claude":
-                if d.get("type") == "user" and not d.get("isMeta"):
+                queued = (d.get("attachment") or {}) if d.get("type") == "attachment" else {}
+                if queued.get("type") == "queued_command" and queued.get("prompt"):
+                    out.append(_classify_in(queued["prompt"], name, parent, farm_sent, ts))
+                elif d.get("type") == "user" and not d.get("isMeta"):
                     c = d["message"]["content"]
                     texts = [c] if isinstance(c, str) else [x.get("text", "") for x in c if x.get("type") == "text"]
                     if texts and texts[0].strip():
@@ -1135,7 +1138,14 @@ def conversation(vendor, session_id, limit=40):
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if d.get("type") == "user" and not d.get("isMeta"):
+                queued = (d.get("attachment") or {}) if d.get("type") == "attachment" else {}
+                if queued.get("type") == "queued_command" and queued.get("prompt"):
+                    # a message that arrived while the agent was busy (absorbed into the running turn)
+                    t = _human_text(queued["prompt"])
+                    human_turn = human_turn or t is not None
+                    if t:
+                        out.append({"from": "you", "text": t, "ts": d.get("timestamp")})
+                elif d.get("type") == "user" and not d.get("isMeta"):
                     c = d["message"]["content"]
                     texts = [c] if isinstance(c, str) else [x.get("text", "") for x in c if x.get("type") == "text"]
                     if texts:
